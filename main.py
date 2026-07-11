@@ -9679,24 +9679,38 @@ class CompanyUpdateRequest(BaseModel):
     timezone:     str | None = None  # IANA tz, e.g. 'Asia/Tashkent'
 
 class BranchCreateRequest(BaseModel):
-    slug:                 str
-    name_ru:              str
-    name_uz:              str = ""
-    lat:                  float | None = None
-    lon:                  float | None = None
-    phones:               list[str] = []
-    tg_delivery_group_id: int | None = None
-    tg_orders_channel_id: int | None = None
+    slug:                      str
+    name_ru:                   str
+    name_uz:                   str = ""
+    lat:                       float | None = None
+    lon:                       float | None = None
+    phones:                    list[str] = []
+    tg_delivery_group_id:      int | None = None
+    tg_orders_channel_id:      int | None = None
+    tg_leads_group_id:         int | None = None
+    tg_delivery_channel_id:    int | None = None
+    tg_delivery_channel_link:  str | None = None
+    telegram_link:             str | None = None
+    admin_tg_link:             str | None = None
+    whatsapp:                  str | None = None
+    instagram:                 str | None = None
 
 class BranchUpdateRequest(BaseModel):
-    name_ru:              str | None = None
-    name_uz:              str | None = None
-    lat:                  float | None = None
-    lon:                  float | None = None
-    phones:               list[str] | None = None
-    tg_delivery_group_id: int | None = None
-    tg_orders_channel_id: int | None = None
-    active:               bool | None = None
+    name_ru:                   str | None = None
+    name_uz:                   str | None = None
+    lat:                       float | None = None
+    lon:                       float | None = None
+    phones:                    list[str] | None = None
+    tg_delivery_group_id:      int | None = None
+    tg_orders_channel_id:      int | None = None
+    tg_leads_group_id:         int | None = None
+    tg_delivery_channel_id:    int | None = None
+    tg_delivery_channel_link:  str | None = None
+    telegram_link:             str | None = None
+    admin_tg_link:             str | None = None
+    whatsapp:                  str | None = None
+    instagram:                 str | None = None
+    active:                    bool | None = None
 
 
 @app.post("/api/saas/auth")
@@ -9792,6 +9806,13 @@ async def branches_create(req: BranchCreateRequest, staff=Depends(get_current_st
         lat=req.lat, lon=req.lon, phones=req.phones,
         tg_delivery_group_id=req.tg_delivery_group_id,
         tg_orders_channel_id=req.tg_orders_channel_id,
+        tg_leads_group_id=req.tg_leads_group_id,
+        tg_delivery_channel_id=req.tg_delivery_channel_id,
+        tg_delivery_channel_link=req.tg_delivery_channel_link,
+        telegram_link=req.telegram_link,
+        admin_tg_link=req.admin_tg_link,
+        whatsapp=req.whatsapp,
+        instagram=req.instagram,
     )
     if not branch:
         raise HTTPException(status_code=409, detail="Slug уже занят в этой компании")
