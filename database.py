@@ -56,23 +56,15 @@ async def create_tables():
             UNIQUE(company_id, slug)
         );
         """)
-        # Seed ARTEZ company (id=1)
+        # Seed default company (id=1) — branches are managed via admin panel, not seeded here
         await c.execute("""
         INSERT INTO companies (id, name, slug, secret_key, plan, active)
-        VALUES (1, 'ARTEZ', 'artez', 'artez_secret_key_change_me', 'starter', TRUE)
+        VALUES (1, 'default', 'default', 'change_me_before_use', 'starter', TRUE)
         ON CONFLICT DO NOTHING;
         """)
         await c.execute(
             "SELECT setval('companies_id_seq', GREATEST((SELECT MAX(id) FROM companies), 1), true)"
         )
-        # Seed Zarafshan + Navoi branches for ARTEZ
-        await c.execute("""
-        INSERT INTO branches (company_id, slug, name_ru, name_uz, lat, lon, phones)
-        VALUES
-            (1, 'zarafshan', 'Зарафшан', 'Zarafshon', 41.5714, 64.1953, '["1221","+998792221221"]'),
-            (1, 'navoi',     'Навои',    'Navoiy',    40.1032, 65.3791, '["1221","+998792221221"]')
-        ON CONFLICT (company_id, slug) DO NOTHING;
-        """)
 
     # ── Шаг 1: основные таблицы ──────────────────────────────────────────
     async with pool.acquire() as c:
