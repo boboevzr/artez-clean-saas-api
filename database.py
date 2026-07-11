@@ -1731,6 +1731,7 @@ async def list_promotions() -> list:
     (shown_count/used_count) через LEFT JOIN на promo_user_state."""
     if not pool:
         return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT p.*,
@@ -1739,9 +1740,10 @@ async def list_promotions() -> list:
                    COUNT(pus.used_order_id)     AS used_count
             FROM promotions p
             LEFT JOIN promo_user_state pus ON pus.promotion_id = p.id
+            WHERE p.company_id=$1
             GROUP BY p.id
             ORDER BY p.id DESC
-        """)
+        """, cid)
         return [dict(r) for r in rows]
 
 
@@ -1752,18 +1754,19 @@ async def create_promotion(code: str, title_ru: str, title_uz: str, text_ru: str
     """Admin: создаёт новую промо-кампанию. Если is_active=True — деактивирует остальные
     кампании (правило "не более одной активной одновременно"), чтобы ORDER BY id DESC
     в _get_active_promotion() никогда не разрешал неоднозначность на практике."""
+    cid = _cid()
     async with pool.acquire() as conn:
         async with conn.transaction():
             if is_active:
-                await conn.execute("UPDATE promotions SET is_active = FALSE WHERE is_active = TRUE")
+                await conn.execute("UPDATE promotions SET is_active = FALSE WHERE is_active = TRUE AND company_id=$1", cid)
             row = await conn.fetchrow("""
                 INSERT INTO promotions (code, title_ru, title_uz, text_ru, text_uz, discount_pct,
                                          starts_at, ends_at, window_hours, sound_enabled,
-                                         target_new_only, is_active)
-                VALUES ($1,$2,$3,$4,$5,$6, COALESCE($7, NOW()), $8, $9, $10, $11, $12)
+                                         target_new_only, is_active, company_id)
+                VALUES ($1,$2,$3,$4,$5,$6, COALESCE($7, NOW()), $8, $9, $10, $11, $12, $13)
                 RETURNING *
             """, code, title_ru, title_uz, text_ru, text_uz, discount_pct,
-                 starts_at, ends_at, window_hours, sound_enabled, target_new_only, is_active)
+                 starts_at, ends_at, window_hours, sound_enabled, target_new_only, is_active, cid)
             return dict(row)
 
 
@@ -1772,26 +1775,28 @@ async def update_promotion(promo_id: int, **kwargs) -> dict | None:
     остальные кампании перед апдейтом (та же гарантия "не более одной активной одновременно")."""
     if not pool:
         return None
+    cid = _cid()
     allowed = {"code", "title_ru", "title_uz", "text_ru", "text_uz", "discount_pct",
                "starts_at", "ends_at", "window_hours", "sound_enabled",
                "target_new_only", "is_active"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM promotions WHERE id=$1", promo_id)
+            row = await conn.fetchrow("SELECT * FROM promotions WHERE id=$1 AND company_id=$2", promo_id, cid)
             return dict(row) if row else None
     sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
     vals = list(fields.values())
+    cid_idx = len(fields) + 2
     async with pool.acquire() as conn:
         async with conn.transaction():
             if fields.get("is_active") is True:
                 await conn.execute(
-                    "UPDATE promotions SET is_active = FALSE WHERE is_active = TRUE AND id != $1",
-                    promo_id
+                    "UPDATE promotions SET is_active = FALSE WHERE is_active = TRUE AND id != $1 AND company_id=$2",
+                    promo_id, cid
                 )
             row = await conn.fetchrow(
-                f"UPDATE promotions SET {sets} WHERE id=$1 RETURNING *",
-                promo_id, *vals
+                f"UPDATE promotions SET {sets} WHERE id=$1 AND company_id=${cid_idx} RETURNING *",
+                promo_id, *vals, cid
             )
             return dict(row) if row else None
 
@@ -3771,8 +3776,9 @@ async def check_phone_duplicate(phone: str) -> dict:
 
 async def get_tg_status_messages() -> list[dict]:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM tg_status_messages ORDER BY status")
+        rows = await conn.fetch("SELECT * FROM tg_status_messages WHERE company_id=$1 ORDER BY status", cid)
         return [dict(r) for r in rows]
 
 async def get_tg_status_message(status: str) -> dict | None:
@@ -3783,14 +3789,16 @@ async def get_tg_status_message(status: str) -> dict | None:
 
 async def upsert_tg_status_message(status: str, enabled: bool, message_ru: str, message_uz: str) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (status) DO UPDATE
               SET enabled=$2, message_ru=$3, message_uz=$4
+            WHERE tg_status_messages.company_id=$5
             RETURNING *
-        """, status, enabled, message_ru, message_uz)
+        """, status, enabled, message_ru, message_uz, cid)
         return dict(row) if row else {}
 
 
@@ -4985,35 +4993,40 @@ async def ensure_plans_table():
 
 async def get_plans():
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM plans ORDER BY status, priority DESC, created_at DESC")
+        rows = await conn.fetch("SELECT * FROM plans WHERE company_id=$1 ORDER BY status, priority DESC, created_at DESC", cid)
     return [dict(r) for r in rows]
 
 async def create_plan(title: str, description: str, priority: str):
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO plans(title,description,priority) VALUES($1,$2,$3) RETURNING *",
-            title, description, priority
+            "INSERT INTO plans(title,description,priority,company_id) VALUES($1,$2,$3,$4) RETURNING *",
+            title, description, priority, cid
         )
     return dict(row)
 
 async def update_plan(plan_id: int, **kwargs):
     if not pool: return None
+    cid = _cid()
     fields = {k: v for k, v in kwargs.items() if k in ('title','description','status','priority','done_at')}
     if not fields: return None
     sets   = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
     values = list(fields.values())
+    cid_idx = len(fields) + 2
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE plans SET {sets} WHERE id=$1 RETURNING *", plan_id, *values
+            f"UPDATE plans SET {sets} WHERE id=$1 AND company_id=${cid_idx} RETURNING *", plan_id, *values, cid
         )
     return dict(row) if row else None
 
 async def delete_plan(plan_id: int):
     if not pool: return
+    cid = _cid()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM plans WHERE id=$1", plan_id)
+        await conn.execute("DELETE FROM plans WHERE id=$1 AND company_id=$2", plan_id, cid)
 
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
@@ -5053,10 +5066,11 @@ async def ensure_chat_tables():
 
 async def create_chat_session(code: str, client_phone: str = '', client_name: str = '', branch: str = '', lang: str = 'uz') -> dict:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO chat_sessions (code, client_phone, client_name, branch, lang) VALUES ($1,$2,$3,$4,$5) RETURNING *",
-            code, client_phone, client_name, branch, lang
+            "INSERT INTO chat_sessions (code, client_phone, client_name, branch, lang, company_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
+            code, client_phone, client_name, branch, lang, cid
         )
         return dict(row) if row else None
 
@@ -5068,9 +5082,11 @@ async def get_chat_session(code: str) -> dict:
 
 async def get_active_chat_sessions() -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM chat_sessions WHERE status IN ('pending','active') ORDER BY created_at DESC"
+            "SELECT * FROM chat_sessions WHERE status IN ('pending','active') AND company_id=$1 ORDER BY created_at DESC",
+            cid
         )
         return [dict(r) for r in rows]
 
@@ -5097,16 +5113,17 @@ async def get_active_chat_by_phone(phone: str) -> dict:
 async def get_closed_chat_sessions(limit: int = 50, offset: int = 0,
                                     staff_id: int = None, own_only: bool = False) -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         if own_only and staff_id:
             rows = await conn.fetch(
-                "SELECT * FROM chat_sessions WHERE status='closed' AND claimed_by=$1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
-                staff_id, limit, offset
+                "SELECT * FROM chat_sessions WHERE status='closed' AND claimed_by=$1 AND company_id=$4 ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
+                staff_id, limit, offset, cid
             )
         else:
             rows = await conn.fetch(
-                "SELECT * FROM chat_sessions WHERE status='closed' ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
-                limit, offset
+                "SELECT * FROM chat_sessions WHERE status='closed' AND company_id=$3 ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
+                limit, offset, cid
             )
         return [dict(r) for r in rows]
 
@@ -5177,8 +5194,9 @@ async def ensure_chat_templates():
 
 async def get_chat_templates(lang: str = None, key: str = None) -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        conditions, args = ["active=TRUE"], []
+        conditions, args = ["active=TRUE", "company_id=$1"], [cid]
         if lang:  args.append(lang);  conditions.append(f"lang=${len(args)}")
         if key:   args.append(key);   conditions.append(f"key=${len(args)}")
         rows = await conn.fetch(
@@ -5189,31 +5207,34 @@ async def get_chat_templates(lang: str = None, key: str = None) -> list:
 
 async def get_all_chat_templates() -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM chat_templates ORDER BY lang, key, sort_order, id")
+        rows = await conn.fetch("SELECT * FROM chat_templates WHERE company_id=$1 ORDER BY lang, key, sort_order, id", cid)
         return [dict(r) for r in rows]
 
 async def upsert_chat_template(data: dict) -> dict:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         tid = data.get('id')
         if tid:
             row = await conn.fetchrow(
-                "UPDATE chat_templates SET key=$2,lang=$3,text=$4,sort_order=$5,active=$6 WHERE id=$1 RETURNING *",
+                "UPDATE chat_templates SET key=$2,lang=$3,text=$4,sort_order=$5,active=$6 WHERE id=$1 AND company_id=$7 RETURNING *",
                 tid, data['key'], data['lang'], data['text'],
-                data.get('sort_order', 0), data.get('active', True)
+                data.get('sort_order', 0), data.get('active', True), cid
             )
         else:
             row = await conn.fetchrow(
-                "INSERT INTO chat_templates (key,lang,text,sort_order,active) VALUES ($1,$2,$3,$4,$5) RETURNING *",
-                data['key'], data['lang'], data['text'], data.get('sort_order', 0), data.get('active', True)
+                "INSERT INTO chat_templates (key,lang,text,sort_order,active,company_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
+                data['key'], data['lang'], data['text'], data.get('sort_order', 0), data.get('active', True), cid
             )
         return dict(row) if row else None
 
 async def delete_chat_template(tid: int):
     if not pool: return
+    cid = _cid()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM chat_templates WHERE id=$1", tid)
+        await conn.execute("DELETE FROM chat_templates WHERE id=$1 AND company_id=$2", tid, cid)
 
 _CHAT_TEMPLATE_SEED = [
     # ── Авто-сообщения RU ──
@@ -5449,24 +5470,26 @@ async def extend_debt_due_date(order_id: int, new_due_date_str: str, note: str =
 
 async def create_discount_request(order_id: int, order_num: str, driver_tg_id: int, requested_amount: float) -> dict | None:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO discount_requests(order_id, order_num, driver_tg_id, requested_amount)
-            VALUES($1,$2,$3,$4) RETURNING *
-        """, order_id, order_num, driver_tg_id, requested_amount)
+            INSERT INTO discount_requests(order_id, order_num, driver_tg_id, requested_amount, company_id)
+            VALUES($1,$2,$3,$4,$5) RETURNING *
+        """, order_id, order_num, driver_tg_id, requested_amount, cid)
         return dict(row) if row else None
 
 async def get_pending_discount_requests() -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT dr.*, o.client_first_name, o.client_last_name,
                    COALESCE(o.total_price,0) AS order_total
             FROM discount_requests dr
             LEFT JOIN orders o ON o.id = dr.order_id
-            WHERE dr.status='pending'
+            WHERE dr.status='pending' AND dr.company_id=$1
             ORDER BY dr.created_at ASC
-        """)
+        """, cid)
         return [dict(r) for r in rows]
 
 async def resolve_discount_request(request_id: int, approved_amount: float, resolved_by: int) -> dict | None:
@@ -5503,16 +5526,18 @@ async def reject_discount_request(request_id: int, resolved_by: int) -> dict | N
 async def create_debt_approval_request(order_id: int, order_num: str, driver_tg_id: int,
                                         debt_amount: float, mgr_msgs_json: str = '{}') -> dict | None:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO debt_approval_requests(order_id, order_num, driver_tg_id, debt_amount, mgr_msgs)
-            VALUES($1,$2,$3,$4,$5::jsonb)
+            INSERT INTO debt_approval_requests(order_id, order_num, driver_tg_id, debt_amount, mgr_msgs, company_id)
+            VALUES($1,$2,$3,$4,$5::jsonb,$6)
             RETURNING id, order_id, order_num, debt_amount, status
-        """, order_id, order_num, driver_tg_id, debt_amount, mgr_msgs_json)
+        """, order_id, order_num, driver_tg_id, debt_amount, mgr_msgs_json, cid)
         return dict(row) if row else None
 
 async def get_pending_debt_approvals() -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT dar.id, dar.order_id, dar.order_num, dar.driver_tg_id,
@@ -5530,9 +5555,9 @@ async def get_pending_debt_approvals() -> list:
                    COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id = o.id), 0)::int AS item_count
             FROM debt_approval_requests dar
             LEFT JOIN orders o ON o.id = dar.order_id
-            WHERE dar.status = 'pending'
+            WHERE dar.status = 'pending' AND dar.company_id=$1
             ORDER BY dar.created_at ASC
-        """)
+        """, cid)
         return [dict(r) for r in rows]
 
 async def get_order_channel_info(order_id: int) -> dict | None:
@@ -6331,6 +6356,7 @@ async def get_agent_monitoring_stats() -> dict:
     """Мониторинг активности персонала: order_activity / lead_calls / chat_messages /
     staff_attendance_events / cash_shifts + orders_in_work + presence_status."""
     if not pool: return {"agents": [], "order_status_breakdown": {}, "activity_trend_7d": []}
+    cid = _cid()
 
     today_tk = datetime.now(_TASHKENT).date()
     yesterday_tk = today_tk - timedelta(days=1)
@@ -6348,7 +6374,7 @@ async def get_agent_monitoring_stats() -> dict:
 
     async with pool.acquire() as conn:
         staff_rows = await conn.fetch(
-            "SELECT id, login, first_name, last_name, role, branch FROM staff WHERE active = true")
+            "SELECT id, login, first_name, last_name, role, branch FROM staff WHERE active = true AND company_id=$1", cid)
 
         oa_rows = await conn.fetch("""
             SELECT staff_id,
@@ -6356,9 +6382,9 @@ async def get_agent_monitoring_stats() -> dict:
                    COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS actions_today,
                    COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $2) AS actions_yesterday
             FROM order_activity
-            WHERE staff_id IS NOT NULL
+            WHERE staff_id IS NOT NULL AND company_id=$3
             GROUP BY staff_id
-        """, today_tk, yesterday_tk)
+        """, today_tk, yesterday_tk, cid)
 
         lc_rows = await conn.fetch("""
             SELECT operator_id AS staff_id,
@@ -6366,9 +6392,9 @@ async def get_agent_monitoring_stats() -> dict:
                    COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS actions_today,
                    COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $2) AS actions_yesterday
             FROM lead_calls
-            WHERE operator_id IS NOT NULL
+            WHERE operator_id IS NOT NULL AND company_id=$3
             GROUP BY operator_id
-        """, today_tk, yesterday_tk)
+        """, today_tk, yesterday_tk, cid)
 
         cm_rows = await conn.fetch("""
             SELECT sender_name,
@@ -6376,9 +6402,9 @@ async def get_agent_monitoring_stats() -> dict:
                    COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS actions_today,
                    COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $2) AS actions_yesterday
             FROM chat_messages
-            WHERE sender_type = 'staff'
+            WHERE sender_type = 'staff' AND company_id=$3
             GROUP BY sender_name
-        """, today_tk, yesterday_tk)
+        """, today_tk, yesterday_tk, cid)
 
         # attendance events: приход/уход
         try:
@@ -6392,8 +6418,9 @@ async def get_agent_monitoring_stats() -> dict:
                        COUNT(*) FILTER (WHERE event_type = 'out'
                            AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS out_today
                 FROM staff_attendance_events
+                WHERE company_id=$2
                 GROUP BY staff_id
-            """, today_tk)
+            """, today_tk, cid)
         except Exception:
             ae_rows = []
 
@@ -6405,9 +6432,9 @@ async def get_agent_monitoring_stats() -> dict:
                        COUNT(*) FILTER (WHERE status = 'open'
                            AND (opened_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS shift_open_today
                 FROM cash_shifts
-                WHERE opened_by IS NOT NULL
+                WHERE opened_by IS NOT NULL AND company_id=$2
                 GROUP BY opened_by
-            """, today_tk)
+            """, today_tk, cid)
         except Exception:
             cs_rows = []
 
@@ -6419,8 +6446,9 @@ async def get_agent_monitoring_stats() -> dict:
                 JOIN staff s ON s.login = o.assigned_to
                 WHERE o.status NOT IN ('delivered','cancelled','new')
                   AND o.assigned_to IS NOT NULL
+                  AND o.company_id=$1
                 GROUP BY s.id
-            """)
+            """, cid)
         except Exception:
             oiw_rows = []
 
@@ -6436,21 +6464,22 @@ async def get_agent_monitoring_stats() -> dict:
                       AND (updated_at AT TIME ZONE 'Asia/Tashkent')::date = $1
                 ) AS cancelled_today
             FROM orders
-        """, today_tk)
+            WHERE company_id=$2
+        """, today_tk, cid)
 
         trend_oa_rows = await conn.fetch("""
             SELECT (created_at AT TIME ZONE 'Asia/Tashkent')::date AS day, COUNT(*) AS cnt
             FROM order_activity
-            WHERE created_at >= $1 AND created_at < $2
+            WHERE created_at >= $1 AND created_at < $2 AND company_id=$3
             GROUP BY day
-        """, ts_from, ts_to)
+        """, ts_from, ts_to, cid)
 
         trend_lc_rows = await conn.fetch("""
             SELECT (created_at AT TIME ZONE 'Asia/Tashkent')::date AS day, COUNT(*) AS cnt
             FROM lead_calls
-            WHERE created_at >= $1 AND created_at < $2
+            WHERE created_at >= $1 AND created_at < $2 AND company_id=$3
             GROUP BY day
-        """, ts_from, ts_to)
+        """, ts_from, ts_to, cid)
 
     # ── вспомогательная merge-функция ─────────────────────────────────────
     def _merge_id(dest: dict, sid, last_active, at=0, ay=0):
@@ -6711,12 +6740,13 @@ async def ensure_sms_dispatch_table():
 async def create_sms_dispatch(name: str, message: str, from_nick: str,
                                phones: list, scheduled_at) -> int:
     if not pool: return 0
+    cid = _cid()
     import json as _j
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO sms_dispatches (name, message, from_nick, phones, scheduled_at)
-            VALUES ($1, $2, $3, $4, $5) RETURNING id
-        """, name, message, from_nick, _j.dumps(phones), scheduled_at)
+            INSERT INTO sms_dispatches (name, message, from_nick, phones, scheduled_at, company_id)
+            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+        """, name, message, from_nick, _j.dumps(phones), scheduled_at, cid)
         return row["id"] if row else 0
 
 async def get_pending_sms_dispatches() -> list:
@@ -6799,6 +6829,7 @@ def _sms_date_range(start_date: str, end_date: str):
 
 async def get_sms_stats_by_month(start_date: str, end_date: str) -> list:
     if not pool: return []
+    cid = _cid()
     s, e = _sms_date_range(start_date, end_date)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -6809,12 +6840,14 @@ async def get_sms_stats_by_month(start_date: str, end_date: str) -> list:
                 COALESCE(SUM(jsonb_array_length(phones)),0)::int AS total_phones
             FROM sms_dispatches
             WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1 AND $2
+              AND company_id=$3
             GROUP BY 1 ORDER BY 1 DESC
-        """, s, e)
+        """, s, e, cid)
         return [dict(r) for r in rows]
 
 async def get_sms_stats_by_date(start_date: str, end_date: str) -> list:
     if not pool: return []
+    cid = _cid()
     s, e = _sms_date_range(start_date, end_date)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -6825,12 +6858,14 @@ async def get_sms_stats_by_date(start_date: str, end_date: str) -> list:
                 COALESCE(SUM(jsonb_array_length(phones)),0)::int AS total_phones
             FROM sms_dispatches
             WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1 AND $2
+              AND company_id=$3
             GROUP BY 1 ORDER BY 1 DESC
-        """, s, e)
+        """, s, e, cid)
         return [dict(r) for r in rows]
 
 async def get_sms_dispatches_report(start_date: str, end_date: str) -> list:
     if not pool: return []
+    cid = _cid()
     s, e = _sms_date_range(start_date, end_date)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -6842,12 +6877,14 @@ async def get_sms_dispatches_report(start_date: str, end_date: str) -> list:
                    TO_CHAR(sent_at     AT TIME ZONE 'Asia/Tashkent', 'DD.MM.YYYY HH24:MI') AS sent_at
             FROM sms_dispatches
             WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1 AND $2
+              AND company_id=$3
             ORDER BY id DESC LIMIT 200
-        """, s, e)
+        """, s, e, cid)
         return [dict(r) for r in rows]
 
 async def get_sms_dispatches_for_export(start_date: str, end_date: str) -> list:
     if not pool: return []
+    cid = _cid()
     s, e = _sms_date_range(start_date, end_date)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -6859,8 +6896,9 @@ async def get_sms_dispatches_for_export(start_date: str, end_date: str) -> list:
                    created_at   AT TIME ZONE 'Asia/Tashkent' AS created_at
             FROM sms_dispatches
             WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1 AND $2
+              AND company_id=$3
             ORDER BY id DESC
-        """, s, e)
+        """, s, e, cid)
         return [dict(r) for r in rows]
 
 
