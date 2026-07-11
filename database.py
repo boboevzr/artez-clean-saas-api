@@ -2104,6 +2104,7 @@ async def upsert_staff_personal(staff_id: int, data: dict) -> None:
 
 async def get_staff_salary(staff_id: int) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT salary_type, salary_rate, salary_work_days, advance_percent FROM staff WHERE id=$1", staff_id)
@@ -2116,7 +2117,7 @@ async def get_staff_salary(staff_id: int) -> dict:
             "advance_percent": float(row["advance_percent"]) if row["advance_percent"] else None,
         }
         prows = await conn.fetch(
-            "SELECT role, percent FROM staff_salary_percents WHERE staff_id=$1 ORDER BY id", staff_id)
+            "SELECT role, percent FROM staff_salary_percents WHERE staff_id=$1 AND company_id=$2 ORDER BY id", staff_id, cid)
         result["percents"] = [{"role": r["role"], "percent": float(r["percent"])} for r in prows]
         urows = await conn.fetch(
             "SELECT service_key, type_key, total_rate, unit_rate, rate_type "
@@ -2134,6 +2135,7 @@ async def get_staff_salary(staff_id: int) -> dict:
 
 async def save_staff_salary(staff_id: int, data: dict) -> None:
     if not pool: return
+    cid = _cid()
     async with pool.acquire() as conn:
         adv_pct = data.get("advance_percent")
         await conn.execute(
@@ -2141,13 +2143,13 @@ async def save_staff_salary(staff_id: int, data: dict) -> None:
             staff_id, data.get("salary_type", "fixed"),
             data.get("base_amount") or None, data.get("work_days", 26),
             float(adv_pct) if adv_pct is not None else None)
-        await conn.execute("DELETE FROM staff_salary_percents WHERE staff_id=$1", staff_id)
+        await conn.execute("DELETE FROM staff_salary_percents WHERE staff_id=$1 AND company_id=$2", staff_id, cid)
         for p in (data.get("percents") or []):
             if p.get("role") and p.get("percent") is not None:
                 await conn.execute(
-                    "INSERT INTO staff_salary_percents (staff_id, role, percent) VALUES ($1,$2,$3)"
+                    "INSERT INTO staff_salary_percents (staff_id, role, percent, company_id) VALUES ($1,$2,$3,$4)"
                     " ON CONFLICT (staff_id, role) DO UPDATE SET percent=$3",
-                    staff_id, p["role"], float(p["percent"]))
+                    staff_id, p["role"], float(p["percent"]), cid)
         await conn.execute("DELETE FROM staff_salary_per_unit WHERE staff_id=$1", staff_id)
         for u in (data.get("per_unit") or []):
             if u.get("service_key") and u.get("type_key"):
@@ -2555,6 +2557,7 @@ async def update_staff_password(staff_id: int, password_hash: str, plain: str = 
 # ══════════════════════════════════════
 async def get_timesheet(year: int, month: int, staff_id: int = None) -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         sql = """
             SELECT t.id, t.staff_id, t.date::text, t.hours, t.type, t.note,
@@ -2563,8 +2566,9 @@ async def get_timesheet(year: int, month: int, staff_id: int = None) -> list:
             FROM timesheet t
             JOIN staff s ON s.id = t.staff_id
             WHERE EXTRACT(YEAR FROM t.date)=$1 AND EXTRACT(MONTH FROM t.date)=$2
+              AND t.company_id=$3
         """
-        args = [year, month]
+        args = [year, month, cid]
         if staff_id:
             args.append(staff_id); sql += f" AND t.staff_id=${len(args)}"
         sql += " ORDER BY t.date DESC, s.last_name, s.first_name"
@@ -2573,20 +2577,22 @@ async def get_timesheet(year: int, month: int, staff_id: int = None) -> list:
 
 async def save_timesheet(data: dict) -> dict:
     if not pool: return {}
+    cid = _cid()
     from datetime import date as _date
     d = data["date"]
     if isinstance(d, str): d = _date.fromisoformat(d)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO timesheet (staff_id, date, hours, type, note)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO timesheet (staff_id, date, hours, type, note, company_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (staff_id, date)
             DO UPDATE SET hours=$3, type=$4, note=$5
             RETURNING id, staff_id, date::text, hours, type, note
         """, int(data["staff_id"]), d,
             float(data.get("hours") or 8),
             data.get("type", "work"),
-            data.get("note", ""))
+            data.get("note", ""),
+            cid)
         return dict(row) if row else {}
 
 async def update_timesheet(ts_id: int, data: dict) -> dict:
@@ -2668,6 +2674,7 @@ async def reset_timesheet_month(year: int, month: int) -> dict:
 
 async def attendance_check_in(staff_id: int) -> dict:
     if not pool: return {}
+    cid = _cid()
     today = datetime.now(_TASHKENT).date()
     async with pool.acquire() as conn:
         events = await conn.fetch("""
@@ -2679,14 +2686,15 @@ async def attendance_check_in(staff_id: int) -> dict:
         if events and events[-1]["event_type"] == "in":
             return {"error": "already_in"}
         row = await conn.fetchrow("""
-            INSERT INTO staff_attendance_events (staff_id, event_type)
-            VALUES ($1, 'in')
+            INSERT INTO staff_attendance_events (staff_id, event_type, company_id)
+            VALUES ($1, 'in', $2)
             RETURNING id, staff_id, event_type, created_at
-        """, staff_id)
+        """, staff_id, cid)
         return dict(row) if row else {}
 
 async def attendance_check_out(staff_id: int) -> dict:
     if not pool: return {}
+    cid = _cid()
     today = datetime.now(_TASHKENT).date()
     async with pool.acquire() as conn:
         events = await conn.fetch("""
@@ -2698,10 +2706,10 @@ async def attendance_check_out(staff_id: int) -> dict:
         if not events or events[-1]["event_type"] == "out":
             return {"error": "not_checked_in"}
         row = await conn.fetchrow("""
-            INSERT INTO staff_attendance_events (staff_id, event_type)
-            VALUES ($1, 'out')
+            INSERT INTO staff_attendance_events (staff_id, event_type, company_id)
+            VALUES ($1, 'out', $2)
             RETURNING id, staff_id, event_type, created_at
-        """, staff_id)
+        """, staff_id, cid)
         return dict(row) if row else {}
 
 def _pair_attendance_sessions(events: list) -> list:
@@ -2754,6 +2762,7 @@ async def get_attendance_today(staff_id: int) -> dict:
 
 async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         sql = """
             SELECT a.staff_id, a.event_type, a.created_at,
@@ -2762,8 +2771,9 @@ async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> l
             JOIN staff s ON s.id = a.staff_id
             WHERE EXTRACT(YEAR FROM (a.created_at AT TIME ZONE 'Asia/Tashkent'))=$1
               AND EXTRACT(MONTH FROM (a.created_at AT TIME ZONE 'Asia/Tashkent'))=$2
+              AND a.company_id=$3
         """
-        args = [year, month]
+        args = [year, month, cid]
         if staff_id:
             args.append(staff_id); sql += f" AND a.staff_id=${len(args)}"
         sql += " ORDER BY a.staff_id, a.created_at"
@@ -3371,6 +3381,7 @@ async def search_contacts(q: str, limit: int = 10) -> list[dict]:
     """Быстрый поиск по телефону или имени для автодополнения."""
     if not pool or not q:
         return []
+    cid = _cid()
     q = q.strip()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -3379,20 +3390,21 @@ async def search_contacts(q: str, limit: int = 10) -> list[dict]:
                    cc.discount_category, cc.discount_category_pct
             FROM contacts c
             LEFT JOIN crm_clients cc ON cc.phone = c.phone
-            WHERE c.phone ILIKE $1
+            WHERE c.company_id=$4
+              AND (c.phone ILIKE $1
                OR c.phone2 ILIKE $1
                OR c.first_name ILIKE $1
                OR c.last_name ILIKE $1
                OR (c.first_name || ' ' || c.last_name) ILIKE $1
                OR (c.last_name || ' ' || c.first_name) ILIKE $1
-               OR c.short_address ILIKE $1
+               OR c.short_address ILIKE $1)
             ORDER BY
                 CASE WHEN c.phone ILIKE $2 THEN 0
                      WHEN c.phone2 ILIKE $2 THEN 1
                      ELSE 2 END,
                 c.last_name, c.first_name
             LIMIT $3
-        """, f"%{q}%", f"{q}%", limit)
+        """, f"%{q}%", f"{q}%", limit, cid)
         return [dict(r) for r in rows]
 
 
@@ -3403,10 +3415,11 @@ async def upsert_contact(phone: str, first_name: str = "", last_name: str = "",
     """Добавить или обновить контакт (ON CONFLICT по phone)."""
     if not pool or not phone:
         return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO contacts (phone, first_name, last_name, middle_name, phone2, address, short_address, source)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            INSERT INTO contacts (phone, first_name, last_name, middle_name, phone2, address, short_address, source, company_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
             ON CONFLICT (phone) DO UPDATE SET
                 first_name    = CASE WHEN $2 != '' THEN $2 ELSE contacts.first_name END,
                 last_name     = CASE WHEN $3 != '' THEN $3 ELSE contacts.last_name END,
@@ -3416,7 +3429,7 @@ async def upsert_contact(phone: str, first_name: str = "", last_name: str = "",
                 short_address = CASE WHEN $7 != '' THEN $7 ELSE contacts.short_address END,
                 updated_at    = NOW()
             RETURNING *
-        """, phone, first_name, last_name, middle_name, phone2, address, short_address, source)
+        """, phone, first_name, last_name, middle_name, phone2, address, short_address, source, cid)
         return dict(row) if row else None
 
 
@@ -3460,41 +3473,48 @@ async def bulk_insert_contacts(rows: list[dict]) -> dict:
 async def get_contacts_list(search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
     if not pool:
         return []
+    cid = _cid()
     async with pool.acquire() as conn:
         if search:
             rows = await conn.fetch("""
                 SELECT * FROM contacts
-                WHERE phone ILIKE $1 OR phone2 ILIKE $1
+                WHERE company_id=$4
+                  AND (phone ILIKE $1 OR phone2 ILIKE $1
                    OR first_name ILIKE $1 OR last_name ILIKE $1
                    OR middle_name ILIKE $1 OR address ILIKE $1
-                   OR short_address ILIKE $1
+                   OR short_address ILIKE $1)
                 ORDER BY id DESC LIMIT $2 OFFSET $3
-            """, f"%{search}%", limit, offset)
+            """, f"%{search}%", limit, offset, cid)
         else:
             rows = await conn.fetch(
-                "SELECT * FROM contacts ORDER BY id DESC LIMIT $1 OFFSET $2", limit, offset)
+                "SELECT * FROM contacts WHERE company_id=$3 ORDER BY id DESC LIMIT $1 OFFSET $2",
+                limit, offset, cid)
         return [dict(r) for r in rows]
 
 
 async def get_contacts_total(search: str = "") -> int:
     if not pool:
         return 0
+    cid = _cid()
     async with pool.acquire() as conn:
         if search:
             return await conn.fetchval("""
                 SELECT COUNT(*) FROM contacts
-                WHERE phone ILIKE $1 OR phone2 ILIKE $1
+                WHERE company_id=$2
+                  AND (phone ILIKE $1 OR phone2 ILIKE $1
                    OR first_name ILIKE $1 OR last_name ILIKE $1
-                   OR short_address ILIKE $1
-            """, f"%{search}%")
-        return await conn.fetchval("SELECT COUNT(*) FROM contacts")
+                   OR short_address ILIKE $1)
+            """, f"%{search}%", cid)
+        return await conn.fetchval("SELECT COUNT(*) FROM contacts WHERE company_id=$1", cid)
 
 
 async def get_contacts_source_counts() -> dict:
     if not pool:
         return {}
+    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT source, COUNT(*) cnt FROM contacts GROUP BY source")
+        rows = await conn.fetch(
+            "SELECT source, COUNT(*) cnt FROM contacts WHERE company_id=$1 GROUP BY source", cid)
         return {r["source"]: r["cnt"] for r in rows}
 
 
@@ -3972,6 +3992,7 @@ async def get_payments_log(date_from: str, date_to: str) -> list:
 
 async def close_cash_shift(shift_date, closed_by: str, note: str) -> dict:
     if not pool: return {}
+    cid = _cid()
     from datetime import date as _date
     if isinstance(shift_date, str):
         shift_date = _date.fromisoformat(shift_date)
@@ -3991,38 +4012,39 @@ async def close_cash_shift(shift_date, closed_by: str, note: str) -> dict:
                          WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
                          ELSE 0 END ELSE 0 END),0) AS transfer_total,
                 COUNT(*) FILTER (WHERE payment_status IN ('paid','partial')) AS orders_count
-            FROM orders WHERE created_at::date = $1
-        """, shift_date)
+            FROM orders WHERE created_at::date = $1 AND company_id=$2
+        """, shift_date, cid)
         ct = float(totals['cash_total']); kt = float(totals['card_total'])
         tt = float(totals['transfer_total']); oc = int(totals['orders_count'])
         open_shift = await conn.fetchrow(
-            "SELECT id FROM cash_shifts WHERE status='open' ORDER BY opened_at DESC LIMIT 1")
+            "SELECT id FROM cash_shifts WHERE status='open' AND company_id=$1 ORDER BY opened_at DESC LIMIT 1", cid)
         if open_shift:
             row = await conn.fetchrow("""
                 UPDATE cash_shifts SET
                     shift_date=$1, closed_by=$2, note=$3, status='closed', closed_at=NOW(),
                     cash_total=$4, card_total=$5, transfer_total=$6, grand_total=$7, orders_count=$8
-                WHERE id=$9 RETURNING *
-            """, shift_date, closed_by, note, ct, kt, tt, ct+kt+tt, oc, open_shift['id'])
+                WHERE id=$9 AND company_id=$10 RETURNING *
+            """, shift_date, closed_by, note, ct, kt, tt, ct+kt+tt, oc, open_shift['id'], cid)
         else:
             row = await conn.fetchrow("""
-                INSERT INTO cash_shifts (shift_date, closed_by, cash_total, card_total, transfer_total, grand_total, orders_count, note, status, closed_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'closed',NOW()) RETURNING *
-            """, shift_date, closed_by, ct, kt, tt, ct+kt+tt, oc, note)
+                INSERT INTO cash_shifts (shift_date, closed_by, cash_total, card_total, transfer_total, grand_total, orders_count, note, status, closed_at, company_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'closed',NOW(),$9) RETURNING *
+            """, shift_date, closed_by, ct, kt, tt, ct+kt+tt, oc, note, cid)
         return dict(row) if row else {}
 
 async def open_cash_shift(opened_by_id: int) -> dict | None:
     """None — если уже есть открытая смена."""
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         existing = await conn.fetchval(
-            "SELECT id FROM cash_shifts WHERE status='open' LIMIT 1")
+            "SELECT id FROM cash_shifts WHERE status='open' AND company_id=$1 LIMIT 1", cid)
         if existing:
             return None
         row = await conn.fetchrow("""
-            INSERT INTO cash_shifts (opened_at, opened_by, status, shift_date)
-            VALUES (NOW(), $1, 'open', NOW()::date) RETURNING *
-        """, opened_by_id)
+            INSERT INTO cash_shifts (opened_at, opened_by, status, shift_date, company_id)
+            VALUES (NOW(), $1, 'open', NOW()::date, $2) RETURNING *
+        """, opened_by_id, cid)
         return dict(row) if row else {}
 
 async def delete_cash_shift(shift_id: int) -> bool:
@@ -4033,15 +4055,16 @@ async def delete_cash_shift(shift_id: int) -> bool:
 
 async def get_current_shift() -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT cs.*,
                    TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS opener_name
             FROM cash_shifts cs
             LEFT JOIN staff s ON s.id = cs.opened_by
-            WHERE cs.status = 'open'
+            WHERE cs.status = 'open' AND cs.company_id=$1
             ORDER BY cs.opened_at DESC LIMIT 1
-        """)
+        """, cid)
         return dict(row) if row else {}
 
 async def _get_current_shift_id(conn) -> int:
@@ -4051,14 +4074,16 @@ async def _get_current_shift_id(conn) -> int:
 
 async def get_cash_shifts(limit: int = 50) -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT cs.*,
                    TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS opener_name
             FROM cash_shifts cs
             LEFT JOIN staff s ON s.id = cs.opened_by
-            ORDER BY COALESCE(cs.opened_at, cs.closed_at) DESC LIMIT $1
-        """, limit)
+            WHERE cs.company_id=$1
+            ORDER BY COALESCE(cs.opened_at, cs.closed_at) DESC LIMIT $2
+        """, cid, limit)
         return [dict(r) for r in rows]
 
 async def get_cash_daily_total(date_str: str) -> dict:
@@ -4332,14 +4357,15 @@ async def get_item_media_by_id(media_id: int) -> dict:
 async def get_routes(date: str | None = None, driver_id: int | None = None,
                      branch: str | None = None, status: str | None = None) -> list:
     if not pool: return []
+    cid = _cid()
     from datetime import date as _date
     if isinstance(date, str): date = _date.fromisoformat(date)
-    filters, vals, i = [], [], 1
+    filters, vals, i = [f"r.company_id=${1}"], [cid], 2
     if date:      filters.append(f"r.date=${i}::date"); vals.append(date); i+=1
     if driver_id: filters.append(f"r.driver_id=${i}"); vals.append(driver_id); i+=1
     if branch:    filters.append(f"r.branch=${i}"); vals.append(branch); i+=1
     if status:    filters.append(f"r.status=${i}"); vals.append(status); i+=1
-    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    where = "WHERE " + " AND ".join(filters)
     async with pool.acquire() as conn:
         rows = await conn.fetch(f"""
             SELECT r.*,
@@ -4367,15 +4393,16 @@ async def roll_forward_stale_routes() -> int:
 
 async def create_route(data: dict) -> dict:
     if not pool: return {}
+    cid = _cid()
     from datetime import date as _date
     d = _date.fromisoformat(data["date"]) if isinstance(data.get("date"), str) else data.get("date")
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO routes (name, date, driver_id, branch, type, status, note)
-            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
+            INSERT INTO routes (name, date, driver_id, branch, type, status, note, company_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
         """, data.get("name",""), d, data.get("driver_id"),
              data.get("branch"), data.get("type","mixed"),
-             data.get("status","planned"), data.get("note"))
+             data.get("status","planned"), data.get("note"), cid)
         return dict(row) if row else {}
 
 async def get_active_route_orders() -> list:
@@ -4393,11 +4420,12 @@ async def get_active_route_orders() -> list:
 
 async def get_route(route_id: int) -> dict | None:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT r.*, s.first_name || ' ' || s.last_name AS driver_name
-            FROM routes r LEFT JOIN staff s ON s.id=r.driver_id WHERE r.id=$1
-        """, route_id)
+            FROM routes r LEFT JOIN staff s ON s.id=r.driver_id WHERE r.id=$1 AND r.company_id=$2
+        """, route_id, cid)
         if not row: return None
         route = dict(row)
         stops = await conn.fetch("""
@@ -4425,6 +4453,7 @@ async def get_route(route_id: int) -> dict | None:
 
 async def update_route(route_id: int, data: dict) -> dict:
     if not pool: return {}
+    cid = _cid()
     allowed = {"name","date","driver_id","branch","type","status","note"}
     fields = {k: v for k, v in data.items() if k in allowed and v is not None}
     if "date" in fields and isinstance(fields["date"], str):
@@ -4432,16 +4461,18 @@ async def update_route(route_id: int, data: dict) -> dict:
         fields["date"] = _date.fromisoformat(fields["date"])
     if not fields: return {}
     sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    cid_idx = len(fields) + 2
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE routes SET {sets}, updated_at=NOW() WHERE id=$1 RETURNING *",
-            route_id, *fields.values())
+            f"UPDATE routes SET {sets}, updated_at=NOW() WHERE id=$1 AND company_id=${cid_idx} RETURNING *",
+            route_id, *fields.values(), cid)
         return dict(row) if row else {}
 
 async def delete_route(route_id: int) -> bool:
     if not pool: return False
+    cid = _cid()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM routes WHERE id=$1", route_id)
+        await conn.execute("DELETE FROM routes WHERE id=$1 AND company_id=$2", route_id, cid)
         return True
 
 async def add_orders_to_route(route_id: int, order_ids: list[int]) -> int:
@@ -4624,16 +4655,18 @@ async def get_cash_balance() -> list:
 
 async def add_cash_handover(from_staff_id: int, to_staff_id: int, amount: float, note: str) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         shift_id = await _get_current_shift_id(conn)
         row = await conn.fetchrow("""
-            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note, shift_id)
-            VALUES ($1,$2,$3,$4,$5) RETURNING *
-        """, from_staff_id, to_staff_id, amount, note, shift_id)
+            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note, shift_id, company_id)
+            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
+        """, from_staff_id, to_staff_id, amount, note, shift_id, cid)
         return dict(row) if row else {}
 
 async def get_cash_handovers(limit: int = 50) -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT ch.*,
@@ -4642,41 +4675,44 @@ async def get_cash_handovers(limit: int = 50) -> list:
             FROM cash_handovers ch
             LEFT JOIN staff sf ON sf.id = ch.from_staff_id
             LEFT JOIN staff st ON st.id = ch.to_staff_id
-            WHERE ch.to_type='staff' OR ch.to_type IS NULL
+            WHERE (ch.to_type='staff' OR ch.to_type IS NULL) AND ch.company_id=$2
             ORDER BY ch.created_at DESC LIMIT $1
-        """, limit)
+        """, limit, cid)
         return [dict(r) for r in rows]
 
 async def confirm_cash_handover(handover_id: int, confirmed_by: int) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE cash_handovers SET status='confirmed', confirmed_at=NOW(), confirmed_by=$2
-            WHERE id=$1 RETURNING *
-        """, handover_id, confirmed_by)
+            WHERE id=$1 AND company_id=$3 RETURNING *
+        """, handover_id, confirmed_by, cid)
         return dict(row) if row else {}
 
 async def reject_cash_handover(handover_id: int, rejected_by: int) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE cash_handovers SET status='rejected', confirmed_at=NOW(), confirmed_by=$2
-            WHERE id=$1 AND status='pending' RETURNING *
-        """, handover_id, rejected_by)
+            WHERE id=$1 AND status='pending' AND company_id=$3 RETURNING *
+        """, handover_id, rejected_by, cid)
         return dict(row) if row else {}
 
 async def cancel_cash_handover(handover_id: int, cancelled_by: int, is_admin: bool = False) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         # Admin can cancel any, staff only pending own
         if is_admin:
             row = await conn.fetchrow(
-                "UPDATE cash_handovers SET status='cancelled', confirmed_at=NOW(), confirmed_by=$2 WHERE id=$1 RETURNING *",
-                handover_id, cancelled_by)
+                "UPDATE cash_handovers SET status='cancelled', confirmed_at=NOW(), confirmed_by=$2 WHERE id=$1 AND company_id=$3 RETURNING *",
+                handover_id, cancelled_by, cid)
         else:
             row = await conn.fetchrow(
-                "UPDATE cash_handovers SET status='cancelled', confirmed_at=NOW(), confirmed_by=$2 WHERE id=$1 AND from_staff_id=$2 AND status='pending' RETURNING *",
-                handover_id, cancelled_by)
+                "UPDATE cash_handovers SET status='cancelled', confirmed_at=NOW(), confirmed_by=$2 WHERE id=$1 AND from_staff_id=$2 AND status='pending' AND company_id=$3 RETURNING *",
+                handover_id, cancelled_by, cid)
         return dict(row) if row else {}
 
 async def update_handover_tg_msg(handover_id: int, tg_chat_id: int, tg_msg_id: int):
@@ -4885,18 +4921,20 @@ async def get_unconfirmed_payments() -> list:
 
 async def get_cash_tg_channel() -> str:
     if not pool: return ""
+    cid = _cid()
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT cash_tg_channel_id FROM settings LIMIT 1")
+            row = await conn.fetchrow("SELECT cash_tg_channel_id FROM settings WHERE company_id=$1", cid)
             return (row['cash_tg_channel_id'] or "") if row else ""
     except Exception:
         return ""
 
 async def get_media_channel_id() -> str:
     if not pool: return ""
+    cid = _cid()
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT media_channel_id FROM settings LIMIT 1")
+            row = await conn.fetchrow("SELECT media_channel_id FROM settings WHERE company_id=$1", cid)
             return (row['media_channel_id'] or "") if row else ""
     except Exception:
         return ""
@@ -5808,9 +5846,10 @@ async def ensure_expense_tables():
 async def get_expense_categories_tree() -> list:
     """Возвращает дерево: родители со списком children."""
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM expense_categories WHERE active=TRUE ORDER BY sort_order, id")
+            "SELECT * FROM expense_categories WHERE active=TRUE AND company_id=$1 ORDER BY sort_order, id", cid)
         cats = [dict(r) for r in rows]
     parents = [c for c in cats if not c['parent_id']]
     ch_map: dict = {}
@@ -5824,9 +5863,10 @@ async def get_expense_categories_tree() -> list:
 async def get_expense_categories() -> list:
     """Плоский список всех активных категорий (для обратной совместимости)."""
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM expense_categories WHERE active=TRUE ORDER BY sort_order, id")
+            "SELECT * FROM expense_categories WHERE active=TRUE AND company_id=$1 ORDER BY sort_order, id", cid)
         return [dict(r) for r in rows]
 
 async def create_expense_category(name_ru: str, name_uz: str, icon: str,
@@ -5834,13 +5874,14 @@ async def create_expense_category(name_ru: str, name_uz: str, icon: str,
                                    receipt_required: bool, amount_threshold,
                                    sort_order: int, for_staff: bool = False) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO expense_categories
-                (name_ru, name_uz, icon, parent_id, approve_level, receipt_required, amount_threshold, sort_order, for_staff)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
+                (name_ru, name_uz, icon, parent_id, approve_level, receipt_required, amount_threshold, sort_order, for_staff, company_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *
         """, name_ru, name_uz, icon, parent_id, approve_level,
-             receipt_required, amount_threshold, sort_order, for_staff)
+             receipt_required, amount_threshold, sort_order, for_staff, cid)
         return dict(row) if row else {}
 
 async def update_expense_category(cat_id: int, name_ru: str, name_uz: str, icon: str,
@@ -5876,24 +5917,26 @@ async def delete_expense_category(cat_id: int) -> dict:
 async def create_expense(category_id: int, amount: float, description: str,
                          staff_id: int, branch: str, for_staff_id: int = None) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO expenses (category_id, amount, description, created_by_staff_id, branch, for_staff_id)
-            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
-        """, category_id, amount, description, staff_id, branch, for_staff_id)
+            INSERT INTO expenses (category_id, amount, description, created_by_staff_id, branch, for_staff_id, company_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
+        """, category_id, amount, description, staff_id, branch, for_staff_id, cid)
         return dict(row) if row else {}
 
 async def get_expenses(branch: str = None, status: str = None,
                        category_id: int = None, limit: int = 100) -> list:
     if not pool: return []
-    filters, params = [], []
+    cid = _cid()
+    filters, params = [f"e.company_id=${len([cid])}"], [cid]
     if branch:      filters.append(f"e.branch=${len(params)+1}");           params.append(branch)
     if status == 'paid':
         filters.append("e.status IN ('paid','approved')")
     elif status:
         filters.append(f"e.status=${len(params)+1}"); params.append(status)
     if category_id: filters.append(f"e.category_id=${len(params)+1}"); params.append(category_id)
-    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    where = "WHERE " + " AND ".join(filters)
     async with pool.acquire() as conn:
         rows = await conn.fetch(f"""
             SELECT e.*,
@@ -6065,14 +6108,16 @@ async def ensure_salary_ledger_table():
 
 async def get_advance_max_percent() -> float:
     if not pool: return 50.0
+    cid = _cid()
     async with pool.acquire() as conn:
-        v = await conn.fetchval("SELECT COALESCE(advance_max_percent, 50) FROM settings LIMIT 1")
+        v = await conn.fetchval("SELECT COALESCE(advance_max_percent, 50) FROM settings WHERE company_id=$1", cid)
         return float(v or 50)
 
 async def save_advance_max_percent(pct: float) -> None:
     if not pool: return
+    cid = _cid()
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE settings SET advance_max_percent=$1", pct)
+        await conn.execute("UPDATE settings SET advance_max_percent=$1 WHERE company_id=$2", pct, cid)
 
 async def get_salary_balance(staff_id: int) -> dict:
     """Баланс сотрудника: общий остаток, разбивка за текущий месяц, лимит аванса."""
@@ -6112,6 +6157,7 @@ async def get_salary_balance(staff_id: int) -> dict:
 
 async def get_salary_ledger(staff_id: int, year: int, month: int) -> list:
     if not pool: return []
+    cid = _cid()
     from datetime import date as _date
     period = _date(year, month, 1)
     async with pool.acquire() as conn:
@@ -6119,9 +6165,9 @@ async def get_salary_ledger(staff_id: int, year: int, month: int) -> list:
             SELECT sl.*, TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name
             FROM salary_ledger sl
             LEFT JOIN staff sc ON sc.id = sl.created_by
-            WHERE sl.staff_id=$1 AND sl.period=$2
+            WHERE sl.staff_id=$1 AND sl.period=$2 AND sl.company_id=$3
             ORDER BY sl.created_at
-        """, staff_id, period)
+        """, staff_id, period, cid)
         return [dict(r) for r in rows]
 
 async def add_salary_ledger_entry(staff_id: int, period_str: str, type_: str,
@@ -6129,13 +6175,14 @@ async def add_salary_ledger_entry(staff_id: int, period_str: str, type_: str,
                                    expense_id: int = None, created_by: int = None,
                                    fine_reason: str = None) -> dict:
     if not pool: return {}
+    cid = _cid()
     from datetime import date as _date
     period = _date.fromisoformat(period_str)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO salary_ledger (staff_id, period, type, amount, note, expense_id, created_by, fine_reason)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
-        """, staff_id, period, type_, amount, note, expense_id, created_by, fine_reason)
+            INSERT INTO salary_ledger (staff_id, period, type, amount, note, expense_id, created_by, fine_reason, company_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
+        """, staff_id, period, type_, amount, note, expense_id, created_by, fine_reason, cid)
         return dict(row) if row else {}
 
 async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> dict:
