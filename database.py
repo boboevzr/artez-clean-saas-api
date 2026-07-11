@@ -26,6 +26,54 @@ async def init_db():
 
 
 async def create_tables():
+    # ── Шаг 0: SaaS — компании и филиалы ────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS companies (
+            id           SERIAL PRIMARY KEY,
+            name         VARCHAR(200) NOT NULL,
+            slug         VARCHAR(50)  UNIQUE NOT NULL,
+            secret_key   VARCHAR(100) UNIQUE NOT NULL,
+            plan         VARCHAR(20)  DEFAULT 'starter',
+            max_branches INTEGER      DEFAULT 2,
+            max_staff    INTEGER      DEFAULT 20,
+            active       BOOLEAN      DEFAULT TRUE,
+            created_at   TIMESTAMPTZ  DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS branches (
+            id                   SERIAL PRIMARY KEY,
+            company_id           INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            slug                 VARCHAR(50)  NOT NULL,
+            name_ru              VARCHAR(100) NOT NULL,
+            name_uz              VARCHAR(100) NOT NULL DEFAULT '',
+            lat                  NUMERIC(9,6) DEFAULT NULL,
+            lon                  NUMERIC(9,6) DEFAULT NULL,
+            phones               JSONB   DEFAULT '[]',
+            tg_delivery_group_id BIGINT  DEFAULT NULL,
+            tg_orders_channel_id BIGINT  DEFAULT NULL,
+            active               BOOLEAN DEFAULT TRUE,
+            created_at           TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(company_id, slug)
+        );
+        """)
+        # Seed ARTEZ company (id=1)
+        await c.execute("""
+        INSERT INTO companies (id, name, slug, secret_key, plan, active)
+        VALUES (1, 'ARTEZ', 'artez', 'artez_secret_key_change_me', 'starter', TRUE)
+        ON CONFLICT DO NOTHING;
+        """)
+        await c.execute(
+            "SELECT setval('companies_id_seq', GREATEST((SELECT MAX(id) FROM companies), 1), true)"
+        )
+        # Seed Zarafshan + Navoi branches for ARTEZ
+        await c.execute("""
+        INSERT INTO branches (company_id, slug, name_ru, name_uz, lat, lon, phones)
+        VALUES
+            (1, 'zarafshan', 'Зарафшан', 'Zarafshon', 41.5714, 64.1953, '["1221","+998792221221"]'),
+            (1, 'navoi',     'Навои',    'Navoiy',    40.1032, 65.3791, '["1221","+998792221221"]')
+        ON CONFLICT (company_id, slug) DO NOTHING;
+        """)
+
     # ── Шаг 1: основные таблицы ──────────────────────────────────────────
     async with pool.acquire() as c:
         await c.execute("""
@@ -1010,6 +1058,94 @@ async def create_tables():
         ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS discount_category_verified_by   INTEGER REFERENCES staff(id) ON DELETE SET NULL;
         ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS discount_category_verified_at   TIMESTAMPTZ;
         """)
+
+    # ── Шаг 22: SaaS — company_id для всех операционных таблиц ─────────
+    _cid = "INTEGER REFERENCES companies(id) DEFAULT 1"
+    company_id_migrations = [
+        # Users / Staff
+        f"ALTER TABLE users              ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE staff              ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE staff_personal     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # CRM
+        f"ALTER TABLE crm_clients        ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE contacts           ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE site_contacts      ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Orders
+        f"ALTER TABLE orders             ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE order_items        ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE order_payments     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE order_photos       ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE order_item_media   ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE order_activity     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE order_receipt_log  ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Leads
+        f"ALTER TABLE leads              ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE lead_calls         ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE lead_reminders     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Catalog
+        f"ALTER TABLE prices             ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE services           ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Logistics
+        f"ALTER TABLE routes             ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE route_orders       ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Cash / Expenses
+        f"ALTER TABLE cash_shifts        ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE cash_handovers     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE expense_categories ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE expenses           ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE salary_ledger      ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Settings (one row per company after Etap 2)
+        f"ALTER TABLE settings           ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Autodial
+        f"ALTER TABLE autodial_campaigns     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE autodial_calls         ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE autodial_groups        ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE autodial_group_members ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE autodial_callerids     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE autodial_ivrs          ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # SMS
+        f"ALTER TABLE sms_groups         ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE sms_contacts       ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE sms_dispatches     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Salary detail tables
+        f"ALTER TABLE staff_salary_percents  ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE staff_salary_per_unit  ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE staff_salary_kpi       ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE staff_commissions      ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Timesheet / Attendance
+        f"ALTER TABLE timesheet              ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE staff_attendance_events ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Notifications / Push
+        f"ALTER TABLE agent_notifications    ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE washer_notifications   ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE push_subscriptions     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Approvals
+        f"ALTER TABLE discount_requests      ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE debt_approval_requests ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Promotions
+        f"ALTER TABLE promotions             ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE promo_user_state       ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Telegram / Plans / Chat
+        f"ALTER TABLE tg_status_messages     ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE tg_phone_links         ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE plans                  ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE chat_sessions          ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE chat_messages          ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        f"ALTER TABLE chat_templates         ADD COLUMN IF NOT EXISTS company_id {_cid}",
+        # Indexes on the most-queried tables
+        "CREATE INDEX IF NOT EXISTS idx_staff_company       ON staff(company_id)",
+        "CREATE INDEX IF NOT EXISTS idx_orders_company      ON orders(company_id)",
+        "CREATE INDEX IF NOT EXISTS idx_leads_company       ON leads(company_id)",
+        "CREATE INDEX IF NOT EXISTS idx_crm_clients_company ON crm_clients(company_id)",
+        "CREATE INDEX IF NOT EXISTS idx_routes_company      ON routes(company_id)",
+        "CREATE INDEX IF NOT EXISTS idx_expenses_company    ON expenses(company_id)",
+    ]
+    async with pool.acquire() as c:
+        for sql in company_id_migrations:
+            try:
+                await c.execute(sql)
+            except Exception:
+                pass
 
     logging.info("✅ API: Tables created/verified")
 
