@@ -9660,6 +9660,7 @@ class CompanyUpdateRequest(BaseModel):
     max_branches: int | None = None
     max_staff:    int | None = None
     active:       bool | None = None
+    timezone:     str | None = None  # IANA tz, e.g. 'Asia/Tashkent'
 
 class BranchCreateRequest(BaseModel):
     slug:                 str
@@ -9803,4 +9804,65 @@ async def branches_delete(branch_id: int, staff=Depends(get_current_staff)):
     ok = await db.delete_branch(branch_id, company_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Филиал не найден")
+    return {"ok": True}
+
+
+# ── Настройки компании (timezone и прочее, управляется company admin) ────
+
+_SUPPORTED_TIMEZONES = [
+    {"name": "Asia/Tashkent",   "label": "Ташкент / Навои / Зарафшан (UTC+5)"},
+    {"name": "Asia/Almaty",     "label": "Алматы / Нур-Султан (UTC+5)"},
+    {"name": "Asia/Bishkek",    "label": "Бишкек (UTC+6)"},
+    {"name": "Asia/Dushanbe",   "label": "Душанбе (UTC+5)"},
+    {"name": "Asia/Ashgabat",   "label": "Ашхабад (UTC+5)"},
+    {"name": "Asia/Baku",       "label": "Баку (UTC+4)"},
+    {"name": "Asia/Yerevan",    "label": "Ереван (UTC+4)"},
+    {"name": "Asia/Tbilisi",    "label": "Тбилиси (UTC+4)"},
+    {"name": "Europe/Moscow",   "label": "Москва (UTC+3)"},
+    {"name": "Europe/Istanbul", "label": "Стамбул (UTC+3)"},
+    {"name": "Europe/Kiev",     "label": "Киев (UTC+2/3)"},
+    {"name": "UTC",             "label": "UTC+0"},
+]
+
+
+@app.get("/api/timezones")
+async def list_timezones():
+    """Список поддерживаемых таймзон для выпадающего списка в настройках."""
+    return {"ok": True, "timezones": _SUPPORTED_TIMEZONES}
+
+
+@app.get("/api/company/settings")
+async def company_settings_get(staff=Depends(get_current_staff)):
+    """Настройки текущей компании (timezone и лимиты)."""
+    company_id = staff.get("company_id") or 1
+    c = await db.get_company(company_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    return {"ok": True, "settings": {
+        "timezone": c["timezone"] or db.DEFAULT_TZ_NAME,
+        "name":     c["name"],
+        "plan":     c["plan"],
+        "max_branches": c["max_branches"],
+        "max_staff":    c["max_staff"],
+    }}
+
+
+class CompanySettingsRequest(BaseModel):
+    timezone: str | None = None
+
+
+@app.put("/api/company/settings")
+async def company_settings_update(req: CompanySettingsRequest, staff=Depends(get_current_staff)):
+    """Company admin обновляет настройки своей компании."""
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    updates = {}
+    if req.timezone is not None:
+        allowed_names = {t["name"] for t in _SUPPORTED_TIMEZONES}
+        if req.timezone not in allowed_names:
+            raise HTTPException(status_code=400, detail=f"Неизвестный timezone: {req.timezone}")
+        updates["timezone"] = req.timezone
+    if updates:
+        await db.update_company(company_id, updates)
     return {"ok": True}

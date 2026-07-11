@@ -2,14 +2,52 @@ import os
 import asyncpg
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-_TASHKENT = timezone(timedelta(hours=5))
+_FALLBACK_TZ = timezone(timedelta(hours=5))  # UTC+5 резерв если zoneinfo недоступна
+DEFAULT_TZ_NAME = "Asia/Tashkent"
 
-def _tz_range(date_from: str, date_to: str):
-    """Преобразует строки дат (Ташкент) в UTC границы для TIMESTAMPTZ-сравнения."""
-    df = datetime.fromisoformat(date_from).replace(tzinfo=_TASHKENT)
-    dt = datetime.fromisoformat(date_to).replace(tzinfo=_TASHKENT) + timedelta(days=1)
+# Кеш часовых поясов компаний: {company_id: "Asia/Tashkent"}
+_company_tz_cache: dict[int, str] = {}
+
+
+def _resolve_tz(tz_name: str):
+    """Возвращает tzinfo объект по IANA-имени, фоллбек — UTC+5."""
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, Exception):
+        return _FALLBACK_TZ
+
+
+def _tz_range(date_from: str, date_to: str, tz_name: str = DEFAULT_TZ_NAME):
+    """Преобразует строки дат в UTC-границы для TIMESTAMPTZ-сравнения.
+
+    tz_name — IANA timezone компании (например 'Asia/Tashkent').
+    """
+    tz = _resolve_tz(tz_name)
+    df = datetime.fromisoformat(date_from).replace(tzinfo=tz)
+    dt = datetime.fromisoformat(date_to).replace(tzinfo=tz) + timedelta(days=1)
     return df, dt
+
+
+async def get_company_tz(company_id: int) -> str:
+    """Возвращает IANA timezone компании (с кешем в памяти)."""
+    if company_id in _company_tz_cache:
+        return _company_tz_cache[company_id]
+    if not pool:
+        return DEFAULT_TZ_NAME
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT timezone FROM companies WHERE id=$1", company_id
+        )
+    tz = (row["timezone"] if row and row["timezone"] else DEFAULT_TZ_NAME)
+    _company_tz_cache[company_id] = tz
+    return tz
+
+
+def invalidate_company_tz_cache(company_id: int):
+    """Сбрасывает кеш после изменения timezone компании."""
+    _company_tz_cache.pop(company_id, None)
 
 DB_URL = os.getenv("DATABASE_URL", "")
 
@@ -37,9 +75,11 @@ async def create_tables():
             plan         VARCHAR(20)  DEFAULT 'starter',
             max_branches INTEGER      DEFAULT 2,
             max_staff    INTEGER      DEFAULT 20,
+            timezone     VARCHAR(50)  DEFAULT 'Asia/Tashkent',
             active       BOOLEAN      DEFAULT TRUE,
             created_at   TIMESTAMPTZ  DEFAULT NOW()
         );
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'Asia/Tashkent';
         CREATE TABLE IF NOT EXISTS branches (
             id                   SERIAL PRIMARY KEY,
             company_id           INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -6770,7 +6810,7 @@ async def create_company(name: str, slug: str, secret_key: str,
 
 async def update_company(company_id: int, updates: dict):
     if not pool or not updates: return
-    allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active"}
+    allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active", "timezone"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields: return
     cols = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
@@ -6779,6 +6819,8 @@ async def update_company(company_id: int, updates: dict):
         await conn.execute(
             f"UPDATE companies SET {cols} WHERE id=$1", company_id, *vals
         )
+    if "timezone" in fields:
+        invalidate_company_tz_cache(company_id)
 
 async def delete_company(company_id: int):
     if not pool: return
