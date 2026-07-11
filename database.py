@@ -6734,3 +6734,121 @@ async def get_sms_dispatches_for_export(start_date: str, end_date: str) -> list:
             ORDER BY id DESC
         """, s, e)
         return [dict(r) for r in rows]
+
+
+# ══════════════════════════════════════
+#  SaaS — Компании
+# ══════════════════════════════════════
+
+async def get_all_companies():
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT id, name, slug, plan, max_branches, max_staff, active, created_at "
+            "FROM companies ORDER BY id"
+        )
+
+async def get_company(company_id: int):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM companies WHERE id=$1", company_id
+        )
+
+async def create_company(name: str, slug: str, secret_key: str,
+                          plan: str = "starter", max_branches: int = 5, max_staff: int = 50):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        try:
+            return await conn.fetchrow("""
+                INSERT INTO companies (name, slug, secret_key, plan, max_branches, max_staff, active)
+                VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+                RETURNING *
+            """, name, slug, secret_key, plan, max_branches, max_staff)
+        except Exception:
+            return None  # slug уже занят
+
+async def update_company(company_id: int, updates: dict):
+    if not pool or not updates: return
+    allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return
+    cols = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    vals = list(fields.values())
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE companies SET {cols} WHERE id=$1", company_id, *vals
+        )
+
+async def delete_company(company_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM companies WHERE id=$1", company_id)
+
+
+# ══════════════════════════════════════
+#  SaaS — Филиалы
+# ══════════════════════════════════════
+
+async def get_branches(company_id: int):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT * FROM branches WHERE company_id=$1 ORDER BY id", company_id
+        )
+
+async def get_branch_by_slug(company_id: int, slug: str):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM branches WHERE company_id=$1 AND slug=$2", company_id, slug
+        )
+
+async def create_branch(company_id: int, slug: str, name_ru: str, name_uz: str = "",
+                         lat=None, lon=None, phones: list = None,
+                         tg_delivery_group_id=None, tg_orders_channel_id=None):
+    if not pool: return None
+    import json
+    phones_json = json.dumps(phones or [])
+    async with pool.acquire() as conn:
+        try:
+            return await conn.fetchrow("""
+                INSERT INTO branches
+                    (company_id, slug, name_ru, name_uz, lat, lon, phones,
+                     tg_delivery_group_id, tg_orders_channel_id, active)
+                VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,TRUE)
+                RETURNING *
+            """, company_id, slug, name_ru, name_uz, lat, lon, phones_json,
+                 tg_delivery_group_id, tg_orders_channel_id)
+        except Exception:
+            return None  # slug уже занят
+
+async def update_branch(branch_id: int, company_id: int, updates: dict) -> bool:
+    if not pool or not updates: return False
+    import json
+    allowed = {"name_ru", "name_uz", "lat", "lon", "phones",
+               "tg_delivery_group_id", "tg_orders_channel_id", "active"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return False
+    # phones сериализуем в JSON
+    if "phones" in fields:
+        fields["phones"] = json.dumps(fields["phones"])
+    # Строим SET: name_ru=$3, lat=$4, ...
+    params = [branch_id, company_id]
+    set_parts = []
+    for k, v in fields.items():
+        params.append(v)
+        cast = "::jsonb" if k == "phones" else ""
+        set_parts.append(f"{k}=${len(params)}{cast}")
+    sql = f"UPDATE branches SET {', '.join(set_parts)} WHERE id=$1 AND company_id=$2"
+    async with pool.acquire() as conn:
+        result = await conn.execute(sql, *params)
+        return result != "UPDATE 0"
+
+async def delete_branch(branch_id: int, company_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM branches WHERE id=$1 AND company_id=$2", branch_id, company_id
+        )
+        return result != "DELETE 0"

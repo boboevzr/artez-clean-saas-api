@@ -24,11 +24,12 @@ import receipt
 logging.basicConfig(level=logging.INFO)
 
 # ── Конфигурация ──
-JWT_SECRET     = os.getenv("JWT_SECRET", "dev-secret-change-me")
-JWT_ALGORITHM  = "HS256"
-JWT_EXPIRE_DAYS = 30
-SMS_CODE_TTL_MIN = 5
-ADMIN_PASS     = os.getenv("ADMIN_PASS", "")
+JWT_SECRET        = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_ALGORITHM     = "HS256"
+JWT_EXPIRE_DAYS   = 30
+SMS_CODE_TTL_MIN  = 5
+ADMIN_PASS        = os.getenv("ADMIN_PASS", "")
+SUPERADMIN_SECRET = os.getenv("SUPERADMIN_SECRET", "")  # SaaS: суперадмин-ключ
 
 async def get_admin_pass() -> str:
     """Читает пароль из БД (если изменён через UI), иначе — env var."""
@@ -884,12 +885,22 @@ def create_token(user_id: int, phone: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-def create_staff_token(staff_id: int, login: str, role: str) -> str:
+def create_staff_token(staff_id: int, login: str, role: str, company_id: int = 1) -> str:
     payload = {
         "sub": str(staff_id),
         "login": login,
         "role": role,
         "type": "staff",
+        "company_id": company_id,
+        "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def create_superadmin_token() -> str:
+    payload = {
+        "sub": "superadmin",
+        "type": "superadmin",
         "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -965,6 +976,8 @@ async def get_current_staff(authorization: str = Header(None)):
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен")
+    if payload.get("type") == "superadmin":
+        raise HTTPException(status_code=401, detail="Требуется токен сотрудника")
     # Admin panel token — resolve to real admin staff record
     if payload.get("sub") == "admin":
         admin_staff = await db.get_first_admin_staff()
@@ -972,13 +985,30 @@ async def get_current_staff(authorization: str = Header(None)):
             return dict(admin_staff)
         return {"id": None, "login": "admin", "role": "admin", "sub": "admin", "active": True,
                 "first_name": "Администратор", "last_name": None, "phone": None,
-                "branch": None, "tg_username": None, "position": None}
+                "branch": None, "tg_username": None, "position": None, "company_id": 1}
     if payload.get("type") != "staff":
         raise HTTPException(status_code=401, detail="Требуется токен сотрудника")
     staff = await db.get_staff_by_id(int(payload["sub"]))
     if not staff or not staff["active"]:
         raise HTTPException(status_code=401, detail="Сотрудник не найден или деактивирован")
-    return dict(staff)
+    s = dict(staff)
+    # company_id from DB record (authoritative), fallback to token claim
+    s.setdefault("company_id", payload.get("company_id", 1))
+    return s
+
+
+async def get_superadmin(authorization: str = Header(None)):
+    """Зависимость для суперадмин-эндпоинтов. Принимает токен типа superadmin."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+    if payload.get("type") != "superadmin":
+        raise HTTPException(status_code=403, detail="Требуется суперадмин-токен")
+    return payload
 
 
 def require_perm(permission: str):
@@ -1081,7 +1111,8 @@ async def staff_login(req: StaffLoginRequest):
     if not valid:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
-    token = create_staff_token(staff["id"], staff["login"], staff["role"])
+    token = create_staff_token(staff["id"], staff["login"], staff["role"],
+                               company_id=staff.get("company_id") or 1)
     pub = _staff_public(dict(staff))
     pub["must_change_password"] = bool(staff.get("must_change_password"))
     return {"ok": True, "token": token, "staff": pub}
@@ -9607,3 +9638,169 @@ async def sms_report_status(msg_id: str, _=Depends(_get_admin)):
 @app.get("/api/admin/sms/reports/prices")
 async def sms_report_prices(_=Depends(_get_admin)):
     return {"data": None, "note": "Информация о ценах недоступна на текущем тарифе Eskiz. Обратитесь в поддержку Eskiz или проверьте личный кабинет."}
+
+
+# ══════════════════════════════════════
+#  SaaS — Суперадмин + Компании + Филиалы
+# ══════════════════════════════════════
+
+class SuperadminAuthRequest(BaseModel):
+    secret: str
+
+class CompanyCreateRequest(BaseModel):
+    name:         str
+    slug:         str
+    plan:         str = "starter"
+    max_branches: int = 5
+    max_staff:    int = 50
+
+class CompanyUpdateRequest(BaseModel):
+    name:         str | None = None
+    plan:         str | None = None
+    max_branches: int | None = None
+    max_staff:    int | None = None
+    active:       bool | None = None
+
+class BranchCreateRequest(BaseModel):
+    slug:                 str
+    name_ru:              str
+    name_uz:              str = ""
+    lat:                  float | None = None
+    lon:                  float | None = None
+    phones:               list[str] = []
+    tg_delivery_group_id: int | None = None
+    tg_orders_channel_id: int | None = None
+
+class BranchUpdateRequest(BaseModel):
+    name_ru:              str | None = None
+    name_uz:              str | None = None
+    lat:                  float | None = None
+    lon:                  float | None = None
+    phones:               list[str] | None = None
+    tg_delivery_group_id: int | None = None
+    tg_orders_channel_id: int | None = None
+    active:               bool | None = None
+
+
+@app.post("/api/saas/auth")
+async def saas_auth(req: SuperadminAuthRequest):
+    """Суперадмин-логин по секретному ключу из SUPERADMIN_SECRET env."""
+    if not SUPERADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="Суперадмин не настроен")
+    if req.secret != SUPERADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Неверный секрет")
+    token = create_superadmin_token()
+    return {"ok": True, "token": token}
+
+
+@app.get("/api/saas/companies")
+async def saas_list_companies(_=Depends(get_superadmin)):
+    rows = await db.get_all_companies()
+    return {"ok": True, "companies": [dict(r) for r in rows]}
+
+
+@app.post("/api/saas/companies")
+async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmin)):
+    slug = req.slug.lower().strip()
+    secret_key = secrets.token_urlsafe(32)
+    company = await db.create_company(
+        name=req.name, slug=slug, secret_key=secret_key,
+        plan=req.plan, max_branches=req.max_branches, max_staff=req.max_staff,
+    )
+    if not company:
+        raise HTTPException(status_code=409, detail="Slug уже занят")
+    return {"ok": True, "company": dict(company), "secret_key": secret_key}
+
+
+@app.get("/api/saas/companies/{company_id}")
+async def saas_get_company(company_id: int, _=Depends(get_superadmin)):
+    c = await db.get_company(company_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    branches = await db.get_branches(company_id)
+    return {"ok": True, "company": dict(c), "branches": [dict(b) for b in branches]}
+
+
+@app.put("/api/saas/companies/{company_id}")
+async def saas_update_company(company_id: int, req: CompanyUpdateRequest, _=Depends(get_superadmin)):
+    c = await db.get_company(company_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    await db.update_company(company_id, updates)
+    return {"ok": True}
+
+
+@app.delete("/api/saas/companies/{company_id}")
+async def saas_delete_company(company_id: int, _=Depends(get_superadmin)):
+    if company_id == 1:
+        raise HTTPException(status_code=400, detail="Нельзя удалить дефолтную компанию")
+    await db.delete_company(company_id)
+    return {"ok": True}
+
+
+@app.post("/api/saas/companies/{company_id}/regenerate-key")
+async def saas_regen_key(company_id: int, _=Depends(get_superadmin)):
+    """Сгенерировать новый secret_key для компании."""
+    c = await db.get_company(company_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    new_key = secrets.token_urlsafe(32)
+    await db.update_company(company_id, {"secret_key": new_key})
+    return {"ok": True, "secret_key": new_key}
+
+
+# ── Филиалы (управляются company admin или superadmin) ──────────────────
+
+@app.get("/api/branches")
+async def branches_list(staff=Depends(get_current_staff)):
+    company_id = staff.get("company_id") or 1
+    rows = await db.get_branches(company_id)
+    return {"ok": True, "branches": [dict(r) for r in rows]}
+
+
+@app.post("/api/branches")
+async def branches_create(req: BranchCreateRequest, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    # Проверяем лимит
+    company = await db.get_company(company_id)
+    existing = await db.get_branches(company_id)
+    if company and len(existing) >= (company["max_branches"] or 99):
+        raise HTTPException(status_code=400, detail=f"Достигнут лимит филиалов ({company['max_branches']})")
+    branch = await db.create_branch(
+        company_id=company_id, slug=req.slug.lower().strip(),
+        name_ru=req.name_ru, name_uz=req.name_uz,
+        lat=req.lat, lon=req.lon, phones=req.phones,
+        tg_delivery_group_id=req.tg_delivery_group_id,
+        tg_orders_channel_id=req.tg_orders_channel_id,
+    )
+    if not branch:
+        raise HTTPException(status_code=409, detail="Slug уже занят в этой компании")
+    return {"ok": True, "branch": dict(branch)}
+
+
+@app.put("/api/branches/{branch_id}")
+async def branches_update(branch_id: int, req: BranchUpdateRequest, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "phones" in req.model_dump() and req.phones is not None:
+        updates["phones"] = req.phones  # включаем пустой список тоже
+    ok = await db.update_branch(branch_id, company_id, updates)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Филиал не найден")
+    return {"ok": True}
+
+
+@app.delete("/api/branches/{branch_id}")
+async def branches_delete(branch_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    ok = await db.delete_branch(branch_id, company_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Филиал не найден")
+    return {"ok": True}
