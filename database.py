@@ -750,6 +750,77 @@ async def create_tables():
     await ensure_agent_notifications_table()
     await ensure_washer_notifications_table()
 
+    # ── Шаг 4б: основная таблица заказов ────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id                          SERIAL PRIMARY KEY,
+            order_num                   VARCHAR(20) UNIQUE NOT NULL,
+            company_id                  INTEGER REFERENCES companies(id) DEFAULT 1,
+            client_tg_id                BIGINT,
+            client_tg_username          VARCHAR(100),
+            client_first_name           VARCHAR(100),
+            client_last_name            VARCHAR(100),
+            client_phone                VARCHAR(20),
+            source                      VARCHAR(20) DEFAULT 'bot',
+            branch                      VARCHAR(30),
+            city                        VARCHAR(100),
+            address                     TEXT,
+            short_address               VARCHAR(200) DEFAULT '',
+            location                    VARCHAR(100),
+            location_address            TEXT DEFAULT '',
+            service                     VARCHAR(200),
+            pickup_date                 VARCHAR(50),
+            pickup_time                 VARCHAR(100),
+            note                        TEXT,
+            deadline                    DATE DEFAULT NULL,
+            status                      VARCHAR(30) DEFAULT 'new',
+            operator_tg_id              BIGINT,
+            operator_username           VARCHAR(100),
+            operator_first_name         VARCHAR(100),
+            operator_last_name          VARCHAR(100),
+            accepted_at                 TIMESTAMP,
+            washer_tg_id                BIGINT,
+            washer_username             VARCHAR(100),
+            washer_first_name           VARCHAR(100),
+            washer_last_name            VARCHAR(100),
+            washing_started_at          TIMESTAMP,
+            washing_done_at             TIMESTAMP,
+            driver_pickup_tg_id         BIGINT,
+            driver_pickup_username      VARCHAR(100),
+            driver_pickup_first_name    VARCHAR(100),
+            driver_pickup_last_name     VARCHAR(100),
+            pickup_at                   TIMESTAMP,
+            driver_delivery_tg_id       BIGINT,
+            driver_delivery_username    VARCHAR(100),
+            driver_delivery_first_name  VARCHAR(100),
+            driver_delivery_last_name   VARCHAR(100),
+            delivered_at                TIMESTAMP,
+            total_price                 INT DEFAULT NULL,
+            discount_sum                NUMERIC(12,2) DEFAULT 0,
+            delivery_discount           NUMERIC(12,2) DEFAULT 0,
+            manual_discount             NUMERIC(12,2) DEFAULT 0,
+            payment_method              VARCHAR(20) DEFAULT NULL,
+            prepaid_amount              NUMERIC(12,2) DEFAULT 0,
+            payment_status              VARCHAR(20) DEFAULT 'unpaid',
+            paid_at                     TIMESTAMPTZ DEFAULT NULL,
+            created_at                  TIMESTAMP DEFAULT NOW(),
+            updated_at                  TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS order_status_history (
+            id              SERIAL PRIMARY KEY,
+            order_num       VARCHAR(20) NOT NULL,
+            old_status      VARCHAR(30),
+            new_status      VARCHAR(30) NOT NULL,
+            changed_by_tg_id      BIGINT,
+            changed_by_name       VARCHAR(200),
+            note            TEXT,
+            created_at      TIMESTAMP DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_orders_company ON orders(company_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_status  ON orders(status);
+        """)
+
     # ── Шаг 4в: позиции услуг в заказах ─────────────────────────────────
     async with pool.acquire() as c:
         await c.execute("""
