@@ -79,6 +79,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def company_id_middleware(request: Request, call_next):
+    """Читает company_id из JWT и записывает в ContextVar перед каждым запросом."""
+    company_id = 1
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth.removeprefix("Bearer ").strip()
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            company_id = int(payload.get("company_id") or 1)
+        except Exception:
+            pass
+    db.set_request_company(company_id)
+    return await call_next(request)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     logging.error(f"422 on {request.method} {request.url.path}: {exc.errors()}")

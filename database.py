@@ -3,9 +3,23 @@ import asyncpg
 import logging
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from contextvars import ContextVar
 
 _FALLBACK_TZ = timezone(timedelta(hours=5))  # UTC+5 резерв если zoneinfo недоступна
 DEFAULT_TZ_NAME = "Asia/Tashkent"
+
+# ── SaaS: контекст company_id для текущего запроса ───────────────────────
+# Устанавливается middleware в main.py из JWT-токена.
+# Default=1 сохраняет обратную совместимость для любых функций, ещё не обновлённых.
+_request_cid: ContextVar[int] = ContextVar("company_id", default=1)
+
+def set_request_company(company_id: int) -> None:
+    """Вызывается middleware перед каждым запросом."""
+    _request_cid.set(company_id or 1)
+
+def _cid() -> int:
+    """Возвращает company_id текущего запроса (используется внутри DB-функций)."""
+    return _request_cid.get()
 
 # Кеш часовых поясов компаний: {company_id: "Asia/Tashkent"}
 _company_tz_cache: dict[int, str] = {}
@@ -1789,9 +1803,11 @@ async def get_all_prices() -> dict:
     """Возвращает все цены из таблицы prices: {service_key: {type_key: {price, unit_key, min_order}}}"""
     if not pool:
         return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT service_key, type_key, price, unit_key, min_order FROM prices ORDER BY service_key, type_key"
+            "SELECT service_key, type_key, price, unit_key, min_order FROM prices WHERE company_id=$1 ORDER BY service_key, type_key",
+            cid
         )
     result = {}
     for r in rows:
@@ -1826,8 +1842,9 @@ async def set_price(service_key: str, type_key: str, price: int,
 async def get_services():
     if not pool:
         return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM services ORDER BY order_idx, key")
+        rows = await conn.fetch("SELECT * FROM services WHERE company_id=$1 ORDER BY order_idx, key", cid)
         return [dict(r) for r in rows]
 
 async def upsert_service(key: str, name_ru: str, name_uz: str, emoji: str = '', order_idx: int = 0):
@@ -1889,6 +1906,7 @@ async def delete_unit(key: str) -> bool:
 async def get_admin_orders(status: str = None, limit: int = 50):
     if not pool:
         return []
+    cid = _cid()
     async with pool.acquire() as conn:
         q = """
             SELECT o.*,
@@ -1910,9 +1928,9 @@ async def get_admin_orders(status: str = None, limit: int = 50):
         """
         if status:
             rows = await conn.fetch(
-                q.format(where="WHERE o.status=$2"), limit, status)
+                q.format(where="WHERE o.status=$2 AND o.company_id=$3"), limit, status, cid)
         else:
-            rows = await conn.fetch(q.format(where=""), limit)
+            rows = await conn.fetch(q.format(where="WHERE o.company_id=$2"), limit, cid)
         return rows
 
 
@@ -2016,19 +2034,22 @@ async def get_first_admin_staff():
 
 async def get_all_staff():
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         return await conn.fetch(
-            "SELECT * FROM staff ORDER BY active DESC, first_name",
+            "SELECT * FROM staff WHERE company_id=$1 ORDER BY active DESC, first_name", cid
         )
 
 async def create_staff(data: dict) -> int:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         return await conn.fetchval("""
             INSERT INTO staff (first_name, last_name, middle_name, phone, login, password_hash,
                                plain_password, role, position, branch, tg_id, tg_username,
-                               salary_type, salary_rate, hire_date, note, gender, birth_date)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                               salary_type, salary_rate, hire_date, note, gender, birth_date,
+                               company_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
             RETURNING id
         """, data["first_name"], data.get("last_name"), data.get("middle_name"),
             data.get("phone"), data["login"], data["password_hash"],
@@ -2037,10 +2058,11 @@ async def create_staff(data: dict) -> int:
             data.get("tg_id"), data.get("tg_username"),
             data.get("salary_type"), data.get("salary_rate"),
             data.get("hire_date"), data.get("note"), data.get("gender","M"),
-            data.get("birth_date"))
+            data.get("birth_date"), cid)
 
 async def update_staff(staff_id: int, **kwargs):
     if not pool or not kwargs: return
+    cid = _cid()
     allowed = {"first_name","last_name","middle_name","phone","login","role","position",
                "branch","tg_id","tg_username","salary_type","salary_rate","hire_date",
                "note","active","is_active","gender","birth_date"}
@@ -2050,10 +2072,11 @@ async def update_staff(staff_id: int, **kwargs):
     if not fields: return
     sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
     vals = list(fields.values())
+    cid_param = len(fields) + 2
     async with pool.acquire() as conn:
         await conn.execute(
-            f"UPDATE staff SET {sets}, updated_at=NOW() WHERE id=$1",
-            staff_id, *vals
+            f"UPDATE staff SET {sets}, updated_at=NOW() WHERE id=$1 AND company_id=${cid_param}",
+            staff_id, *vals, cid
         )
 
 async def get_staff_personal(staff_id: int) -> dict | None:
@@ -2787,6 +2810,7 @@ async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> l
 
 async def create_lead(data: dict) -> dict:
     if not pool: return None
+    cid = _cid()
     # Тег акции (только видимость для сотрудников, не расходует окно) — только для
     # лидов с сайта/бота, привязанных к зарегистрированному пользователю с живым окном
     promo_id = None
@@ -2813,8 +2837,9 @@ async def create_lead(data: dict) -> dict:
             INSERT INTO leads (client_name, client_phone, service, branch,
                                city, address, short_address, note, status, assigned_to,
                                created_by, volunteer_id, location, location_address,
-                               source, client_tg_id, pickup_date, pickup_time, promo_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+                               source, client_tg_id, pickup_date, pickup_time, promo_id,
+                               company_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
             RETURNING *
         """, data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
@@ -2822,7 +2847,7 @@ async def create_lead(data: dict) -> dict:
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
             data.get("volunteer_id"), data.get("location"), data.get("location_address"),
             source, data.get("client_tg_id"),
-            data.get("pickup_date", ""), data.get("pickup_time", ""), promo_id)
+            data.get("pickup_date", ""), data.get("pickup_time", ""), promo_id, cid)
         rid      = row["id"]
         lead_num = f"LEAD-{rid:04d}"
         lead_code = f"L-{rid:04d}"
@@ -2835,8 +2860,9 @@ async def create_lead(data: dict) -> dict:
 async def get_leads(status: str = None, branch: str = None,
                     assigned_to: int = None, limit: int = 100):
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        filters, args = ["1=1"], []
+        filters, args = [f"l.company_id=$1"], [cid]
         if status:
             args.append(status);   filters.append(f"l.status=${len(args)}")
         if branch:
@@ -2881,23 +2907,26 @@ async def update_lead_status(lead_id: int, status: str, scheduled_at=None):
 
 async def update_lead(lead_id: int, **kwargs) -> dict | None:
     if not pool: return None
+    cid = _cid()
     allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status","location","location_address","volunteer_id","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    cid_param = len(fields) + 2
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE leads SET {set_parts}, updated_at=NOW() WHERE id=$1 RETURNING *",
-            lead_id, *list(fields.values()))
+            f"UPDATE leads SET {set_parts}, updated_at=NOW() WHERE id=$1 AND company_id=${cid_param} RETURNING *",
+            lead_id, *list(fields.values()), cid)
         return dict(row) if row else None
 
 async def delete_lead(lead_id: int) -> bool:
     if not pool: return False
+    cid = _cid()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM agent_notifications WHERE lead_id=$1", lead_id)
         await conn.execute("DELETE FROM lead_reminders       WHERE lead_id=$1", lead_id)
         await conn.execute("DELETE FROM lead_calls           WHERE lead_id=$1", lead_id)
-        res = await conn.execute("DELETE FROM leads WHERE id=$1", lead_id)
+        res = await conn.execute("DELETE FROM leads WHERE id=$1 AND company_id=$2", lead_id, cid)
         return res == "DELETE 1"
 
 async def get_leads_by_agent(agent_id: int, status: str = None):
@@ -2939,6 +2968,7 @@ async def set_lead_code(lead_id: int, code: str):
 
 async def get_lead_by_id(lead_id: int):
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         return await conn.fetchrow("""
             SELECT l.*,
@@ -2960,8 +2990,8 @@ async def get_lead_by_id(lead_id: int):
             LEFT JOIN staff vol  ON vol.id  = l.volunteer_id
             LEFT JOIN staff conv ON conv.id = l.converted_by
             LEFT JOIN staff asgn ON asgn.id = l.assigned_to
-            WHERE l.id = $1
-        """, lead_id)
+            WHERE l.id = $1 AND l.company_id = $2
+        """, lead_id, cid)
 
 # ── lead_calls (журнал звонков) ───────────────────────────────────────
 
@@ -3212,8 +3242,9 @@ async def refresh_crm_client_stats(phone: str):
 async def get_crm_client_by_phone(phone: str) -> dict | None:
     if not pool:
         return None
+    cid = _cid()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM crm_clients WHERE phone = $1", phone)
+        row = await conn.fetchrow("SELECT * FROM crm_clients WHERE phone = $1 AND company_id=$2", phone, cid)
         return dict(row) if row else None
 
 
@@ -3228,19 +3259,21 @@ async def get_crm_client_by_id(client_id: int) -> dict | None:
 async def get_crm_clients_list(search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
     if not pool:
         return []
+    cid = _cid()
     async with pool.acquire() as conn:
         if search:
             rows = await conn.fetch("""
                 SELECT * FROM crm_clients
-                WHERE phone ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1
-                   OR short_address ILIKE $1 OR address ILIKE $1
+                WHERE (phone ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1
+                   OR short_address ILIKE $1 OR address ILIKE $1) AND company_id=$4
                 ORDER BY updated_at DESC LIMIT $2 OFFSET $3
-            """, f"%{search}%", limit, offset)
+            """, f"%{search}%", limit, offset, cid)
         else:
             rows = await conn.fetch("""
                 SELECT * FROM crm_clients
+                WHERE company_id=$3
                 ORDER BY updated_at DESC LIMIT $1 OFFSET $2
-            """, limit, offset)
+            """, limit, offset, cid)
         return [dict(r) for r in rows]
 
 
@@ -3309,12 +3342,13 @@ async def save_crm_client_discount_photo(client_id: int, file_id: str) -> dict |
 async def get_crm_client_orders(phone: str, limit: int = 20) -> list[dict]:
     if not pool:
         return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT order_num, source, service, status, created_at, total_price, branch, address
-            FROM orders WHERE client_phone = $1
+            FROM orders WHERE client_phone = $1 AND company_id=$3
             ORDER BY created_at DESC LIMIT $2
-        """, phone, limit)
+        """, phone, limit, cid)
         return [dict(r) for r in rows]
 
 
@@ -3514,14 +3548,15 @@ async def delete_all_contacts() -> int:
 # ══════════════════════════════════════
 async def update_order_status(order_id: int, status: str, note: str = "") -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         if status == 'washing':
-            sql = "UPDATE orders SET status=$2, washed_at=NOW() WHERE id=$1 RETURNING *"
+            sql = "UPDATE orders SET status=$2, washed_at=NOW() WHERE id=$1 AND company_id=$3 RETURNING *"
         elif status == 'packing':
-            sql = "UPDATE orders SET status=$2, packed_at=NOW() WHERE id=$1 RETURNING *"
+            sql = "UPDATE orders SET status=$2, packed_at=NOW() WHERE id=$1 AND company_id=$3 RETURNING *"
         else:
-            sql = "UPDATE orders SET status=$2 WHERE id=$1 RETURNING *"
-        row = await conn.fetchrow(sql, order_id, status)
+            sql = "UPDATE orders SET status=$2 WHERE id=$1 AND company_id=$3 RETURNING *"
+        row = await conn.fetchrow(sql, order_id, status, cid)
         if row:
             await conn.execute("""
                 INSERT INTO order_status_history (order_num, new_status, note)
@@ -3580,6 +3615,7 @@ async def delete_order_item(item_id: int) -> bool:
 
 async def delete_order(order_id: int) -> bool:
     if not pool: return False
+    cid = _cid()
     async with pool.acquire() as conn:
         # Блокируем удаление если есть платежи — деньги должны быть сняты вручную
         payment_count = await conn.fetchval(
@@ -3587,7 +3623,7 @@ async def delete_order(order_id: int) -> bool:
         if payment_count:
             raise ValueError(f"has_payments:{payment_count}")
         # Получаем order_num до удаления (нужен для history)
-        row = await conn.fetchrow("SELECT order_num FROM orders WHERE id=$1", order_id)
+        row = await conn.fetchrow("SELECT order_num FROM orders WHERE id=$1 AND company_id=$2", order_id, cid)
         order_num = dict(row).get("order_num") if row else None
         # Удаляем медиафайлы позиций
         await conn.execute("DELETE FROM order_item_media WHERE order_id=$1", order_id)
@@ -3601,17 +3637,19 @@ async def delete_order(order_id: int) -> bool:
         if order_num:
             await conn.execute("DELETE FROM order_status_history WHERE order_num=$1", order_num)
         # Удаляем сам заказ
-        res = await conn.execute("DELETE FROM orders WHERE id=$1", order_id)
+        res = await conn.execute("DELETE FROM orders WHERE id=$1 AND company_id=$2", order_id, cid)
         return res == "DELETE 1"
 
 async def get_order_by_id(order_id: int) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM orders WHERE id=$1", order_id)
+        row = await conn.fetchrow("SELECT * FROM orders WHERE id=$1 AND company_id=$2", order_id, cid)
         return dict(row) if row else {}
 
 async def update_order(order_id: int, **kwargs) -> dict:
     if not pool: return {}
+    cid = _cid()
     allowed = {"client_first_name", "client_last_name", "client_phone",
                "branch", "address", "short_address", "location", "location_address", "note", "deadline",
                "service_type", "pickup_type", "self_pickup_discount",
@@ -3620,17 +3658,19 @@ async def update_order(order_id: int, **kwargs) -> dict:
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return {}
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    cid_param = len(fields) + 2
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE orders SET {set_parts} WHERE id=$1 RETURNING *",
-            order_id, *list(fields.values()))
+            f"UPDATE orders SET {set_parts} WHERE id=$1 AND company_id=${cid_param} RETURNING *",
+            order_id, *list(fields.values()), cid)
         return dict(row) if row else {}
 
 async def update_order_discount(order_id: int, discount_sum: float) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "UPDATE orders SET discount_sum=$2 WHERE id=$1 RETURNING *", order_id, discount_sum)
+            "UPDATE orders SET discount_sum=$2 WHERE id=$1 AND company_id=$3 RETURNING *", order_id, discount_sum, cid)
         return dict(row) if row else {}
 
 async def confirm_item_measure(item_id: int) -> dict:
@@ -5322,6 +5362,7 @@ async def mark_order_delivered_with_debt(order_id: int, responsible_id: int,
 
 async def get_orders_with_debt() -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT o.id, o.order_num, o.status, o.debt_due_date, o.debt_approved_at,
@@ -5340,9 +5381,9 @@ async def get_orders_with_debt() -> list:
                    ) AS debt_amount
               FROM orders o
               LEFT JOIN staff sr ON sr.id = o.debt_responsible_id
-             WHERE o.debt_responsible_id IS NOT NULL
+             WHERE o.debt_responsible_id IS NOT NULL AND o.company_id=$1
              ORDER BY o.debt_due_date ASC NULLS LAST, o.id DESC
-        """)
+        """, cid)
         return [r for r in [dict(r) for r in rows] if r["debt_amount"] > 0]
 
 async def extend_debt_due_date(order_id: int, new_due_date_str: str, note: str = '') -> bool:
