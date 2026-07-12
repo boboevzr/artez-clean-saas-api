@@ -2044,6 +2044,15 @@ async def get_admin_orders(status: str = None, limit: int = 50):
         return rows
 
 
+async def get_company_id_by_slug(slug: str) -> int | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM companies WHERE slug=$1 AND active=TRUE", slug
+        )
+        return row["id"] if row else None
+
+
 # ══════════════════════════════════════
 #  СОТРУДНИКИ
 # ══════════════════════════════════════

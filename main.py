@@ -1053,6 +1053,7 @@ class StaffLoginRequest(BaseModel):
     login: str
     password: str
     company_id: int = 1
+    company_slug: str | None = None
 
 class StaffCreateRequest(BaseModel):
     first_name: str
@@ -1112,7 +1113,12 @@ def _staff_public(s: dict) -> dict:
 
 @app.post("/api/staff/login")
 async def staff_login(req: StaffLoginRequest):
-    staff = await db.get_staff_by_login(req.login, req.company_id)
+    company_id = req.company_id
+    if req.company_slug:
+        company_id = await db.get_company_id_by_slug(req.company_slug)
+        if not company_id:
+            raise HTTPException(status_code=401, detail="Компания не найдена")
+    staff = await db.get_staff_by_login(req.login, company_id)
     if not staff:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
@@ -3423,6 +3429,7 @@ class AdminLoginRequest(BaseModel):
     login: str
     password: str
     company_id: int = 1
+    company_slug: str | None = None
 
 class SetPriceRequest(BaseModel):
     service_key: str
@@ -3469,12 +3476,17 @@ async def get_admin(authorization: str = Header(None)):
 
 @app.post("/api/admin/login")
 async def admin_login(req: AdminLoginRequest):
-    staff = await db.get_staff_by_login(req.login, req.company_id)
+    company_id = req.company_id
+    if req.company_slug:
+        company_id = await db.get_company_id_by_slug(req.company_slug)
+        if not company_id:
+            raise HTTPException(status_code=401, detail="Компания не найдена")
+    staff = await db.get_staff_by_login(req.login, company_id)
     if not staff or staff["role"] != "admin":
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     if not pwd_context.verify(req.password[:72], staff["password_hash"]):
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
-    return {"ok": True, "token": create_admin_token(req.company_id)}
+    return {"ok": True, "token": create_admin_token(company_id)}
 
 @app.post("/api/admin/change-master-password")
 async def change_master_password(body: dict, _=Depends(_get_admin)):
