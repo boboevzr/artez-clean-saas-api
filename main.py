@@ -9826,6 +9826,22 @@ async def saas_list_staff(company_id: int, _=Depends(get_superadmin)):
     return {"ok": True, "staff": [dict(r) for r in rows]}
 
 
+class SaasGlobalSettingsRequest(BaseModel):
+    yandex_maps_key: str | None = None
+
+@app.get("/api/saas/global-settings")
+async def saas_get_global_settings(_=Depends(get_superadmin)):
+    return {"ok": True, "settings": {
+        "yandex_maps_key": await db.get_config("yandex_maps_key") or "",
+    }}
+
+@app.put("/api/saas/global-settings")
+async def saas_update_global_settings(req: SaasGlobalSettingsRequest, _=Depends(get_superadmin)):
+    if req.yandex_maps_key is not None:
+        await db.set_config("yandex_maps_key", req.yandex_maps_key)
+    return {"ok": True}
+
+
 # ── Филиалы (управляются company admin или superadmin) ──────────────────
 
 @app.get("/api/branches")
