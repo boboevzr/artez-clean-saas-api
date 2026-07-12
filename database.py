@@ -93,7 +93,14 @@ async def create_tables():
             active       BOOLEAN      DEFAULT TRUE,
             created_at   TIMESTAMPTZ  DEFAULT NOW()
         );
-        ALTER TABLE companies ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'Asia/Tashkent';
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS timezone      VARCHAR(50)  DEFAULT 'Asia/Tashkent';
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS contact_name  VARCHAR(200) DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS contact_phone VARCHAR(50)  DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS contact_email VARCHAR(200) DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS inn           VARCHAR(50)  DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS legal_name    VARCHAR(300) DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS notes         TEXT         DEFAULT NULL;
         CREATE TABLE IF NOT EXISTS branches (
             id                   SERIAL PRIMARY KEY,
             company_id           INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -7017,7 +7024,8 @@ async def get_all_companies():
     if not pool: return []
     async with pool.acquire() as conn:
         return await conn.fetch(
-            "SELECT id, name, slug, plan, max_branches, max_staff, active, created_at "
+            "SELECT id, name, slug, plan, max_branches, max_staff, active, created_at, "
+            "contact_name, contact_phone, contact_email, inn, legal_name, address, notes "
             "FROM companies ORDER BY id"
         )
 

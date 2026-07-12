@@ -9678,12 +9678,19 @@ class CompanyCreateRequest(BaseModel):
     max_staff:    int = 50
 
 class CompanyUpdateRequest(BaseModel):
-    name:         str | None = None
-    plan:         str | None = None
-    max_branches: int | None = None
-    max_staff:    int | None = None
-    active:       bool | None = None
-    timezone:     str | None = None  # IANA tz, e.g. 'Asia/Tashkent'
+    name:          str | None = None
+    plan:          str | None = None
+    max_branches:  int | None = None
+    max_staff:     int | None = None
+    active:        bool | None = None
+    timezone:      str | None = None
+    contact_name:  str | None = None
+    contact_phone: str | None = None
+    contact_email: str | None = None
+    inn:           str | None = None
+    legal_name:    str | None = None
+    address:       str | None = None
+    notes:         str | None = None
 
 class BranchCreateRequest(BaseModel):
     slug:                      str
