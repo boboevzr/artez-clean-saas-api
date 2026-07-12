@@ -1579,17 +1579,19 @@ async def check_sms_rate_limit(phone: str, purpose: str) -> tuple[bool, str]:
 
 async def get_config(key: str) -> str | None:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
-        return await conn.fetchval("SELECT value FROM config WHERE key=$1", key)
+        return await conn.fetchval("SELECT value FROM config WHERE key=$1 AND company_id=$2", key, cid)
 
 
 async def set_config(key: str, value: str):
     if not pool: return
+    cid = _cid()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO config (key, value, updated_at) VALUES ($1, $2, NOW())
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-        """, key, value)
+            INSERT INTO config (key, value, company_id, updated_at) VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, key, value, cid)
 
 
 # ══════════════════════════════════════
@@ -6273,6 +6275,43 @@ async def ensure_salary_ledger_table():
             CREATE UNIQUE INDEX IF NOT EXISTS staff_company_login_unique
             ON staff(company_id, login) WHERE company_id IS NOT NULL
         """)
+        # Make config per-company (SaaS isolation)
+        await conn.execute("ALTER TABLE config ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1")
+        await conn.execute("ALTER TABLE config DROP CONSTRAINT IF EXISTS config_pkey")
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS config_cid_key_uq ON config(company_id, key)")
+
+
+async def delete_company_cascade(company_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM route_orders WHERE route_id IN (SELECT id FROM routes WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM routes WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM order_activity WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM order_payments WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM order_photos WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM order_item_media WHERE item_id IN (SELECT id FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1))", company_id)
+        await conn.execute("DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM orders WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM lead_reminders WHERE lead_id IN (SELECT id FROM leads WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM lead_calls WHERE lead_id IN (SELECT id FROM leads WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM leads WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM staff_personal WHERE staff_id IN (SELECT id FROM staff WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM staff WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM branches WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM config WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM settings WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM crm_clients WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM contacts WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM cash_handovers WHERE shift_id IN (SELECT id FROM cash_shifts WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM cash_shifts WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM autodial_calls WHERE campaign_id IN (SELECT id FROM autodial_campaigns WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM autodial_campaigns WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM autodial_groups WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM push_subscriptions WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM agent_notifications WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM plans WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM companies WHERE id=$1", company_id)
+
 
 async def get_advance_max_percent() -> float:
     if not pool: return 50.0

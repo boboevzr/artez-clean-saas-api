@@ -7452,60 +7452,60 @@ async def save_delivery_discount(discount: float = Body(..., embed=True), _=Depe
 # ── Настройки сайта ──────────────────────────────────────────
 # Fallback: если в БД пусто — берём env-переменную, затем хардкод
 SITE_SETTINGS_DEFAULTS = {
-    # Соцсети
-    "social_instagram":    "https://www.instagram.com/ziyoboboev/",
-    "social_tg_bot":       "https://t.me/artez_orders_bot",
-    "social_tg_group":     "https://t.me/artez_gilam_yuvish",
+    # Соцсети (каждая компания заполняет свои)
+    "social_instagram":    "",
+    "social_tg_bot":       "",
+    "social_tg_group":     "",
     # Контакты
-    "contact_short":       "1221",
-    "contact_main":        "+998792221221",
-    "contact_zarafshan_1":         "+998882001221",
+    "contact_short":       "",
+    "contact_main":        "",
+    "contact_zarafshan_1":         "",
     "contact_zarafshan_2":         "",
     "contact_zarafshan_telegram":  "",
     "contact_zarafshan_admin_tg":  "",
     "contact_zarafshan_whatsapp":  "",
     "contact_zarafshan_instagram": "",
     "branch_zarafshan_location":   "",
-    "contact_navoi_1":             "+998997500020",
+    "contact_navoi_1":             "",
     "contact_navoi_2":             "",
     "contact_navoi_telegram":      "",
     "contact_navoi_admin_tg":      "",
     "contact_navoi_whatsapp":      "",
     "contact_navoi_instagram":     "",
     "branch_navoi_location":       "",
-    # Telegram бот — fallback из env
-    "tg_bot_token":        BOT_TOKEN,
-    "tg_group_id":         GROUP_ID,
-    "tg_group_zarafshan":  GROUP_ID_ZARAFSHAN,
-    "tg_group_navoi":      GROUP_ID_NAVOI,
-    "tg_group_sms_id":     os.getenv("GROUP_SMS_ID", ""),
-    # Яндекс Карты — fallback из env
+    # Telegram бот (настраивается каждой компанией)
+    "tg_bot_token":        "",
+    "tg_group_id":         "",
+    "tg_group_zarafshan":  "",
+    "tg_group_navoi":      "",
+    "tg_group_sms_id":     "",
+    # Яндекс Карты — fallback из env (общий ключ платформы)
     "yandex_maps_key":     os.getenv("YANDEX_MAPS_KEY", ""),
-    # Eskiz SMS — fallback из env
-    "eskiz_email":         ESKIZ_EMAIL,
-    "eskiz_password":      ESKIZ_PASSWORD,
-    "eskiz_from":          ESKIZ_FROM,
-    "sms_text_register":   "Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}",
-    "sms_text_login":      "Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}",
-    "sms_text_reset":      "Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}",
+    # Eskiz SMS (каждая компания подключает свой аккаунт)
+    "eskiz_email":         "",
+    "eskiz_password":      "",
+    "eskiz_from":          "4546",
+    "sms_text_register":   "Kod podtverzhdeniya: {code}",
+    "sms_text_login":      "Kod podtverzhdeniya dlya vhoda: {code}",
+    "sms_text_reset":      "Kod vosstanovleniya parolya: {code}",
     # ОСАГО партнёр
-    "osago_partner_phone": "+998936121300",
-    "osago_partner_promo": "ARTEZ",
+    "osago_partner_phone": "",
+    "osago_partner_promo": "",
     # Google Sheets
-    "sheets_url":          SHEETS_URL,
-    # Новые пользователи сайта — группа уведомлений
-    "new_clients_group_id":    GROUP_NEW_CLIENTS_ID,
+    "sheets_url":          "",
+    # Группа уведомлений
+    "new_clients_group_id":    "",
     # Группа водителей/доставщиков (маршруты)
-    "delivery_group_id":              GROUP_DELIVERY_ID,
-    "delivery_group_zarafshan_id":      GROUP_DELIVERY_ZARAFSHAN_ID,
-    "delivery_group_navoi_id":          GROUP_DELIVERY_NAVOI_ID,
-    "delivery_channel_zarafshan_id":    GROUP_DELIVERY_ZARAFSHAN_CHANNEL,
-    "delivery_channel_navoi_id":        GROUP_DELIVERY_NAVOI_CHANNEL,
-    "delivery_channel_zarafshan_link":  "https://t.me/+NmPO9-2PDYVlNzQy",
+    "delivery_group_id":              "",
+    "delivery_group_zarafshan_id":      "",
+    "delivery_group_navoi_id":          "",
+    "delivery_channel_zarafshan_id":    "",
+    "delivery_channel_navoi_id":        "",
+    "delivery_channel_zarafshan_link":  "",
     "delivery_channel_navoi_link":      "",
     "delivery_group_template": "🚗 {route_name}-{count} — {route_type} · {date} {time}",
-    # Лиды — группы и шаблон уведомлений
-    "leads_group_id":          LEADS_GROUP_ID,
+    # Лиды
+    "leads_group_id":          "",
     "leads_group_zarafshan":   "",
     "leads_group_navoi":       "",
     "leads_group_enabled": "0",
@@ -7523,12 +7523,12 @@ SITE_SETTINGS_DEFAULTS = {
     ),
     "callback_overdue_minutes": "10",
     # Комиссия агентов за лиды
-    "agent_commission_type":    "percent",   # "percent" | "fixed"
-    "agent_commission_percent": "5.0",       # % от суммы заказа (по умолчанию)
-    "agent_commission_fixed":   "0",         # фиксированная сумма (если type=fixed)
-    # Текст чека (JPEG-квитанция)
-    "receipt_header_text": "ARTEZ",
-    "receipt_slogan":      "Химчистка ковров, мебели, матрасов и штор",
+    "agent_commission_type":    "percent",
+    "agent_commission_percent": "5.0",
+    "agent_commission_fixed":   "0",
+    # Текст чека (компания заполняет под себя)
+    "receipt_header_text": "",
+    "receipt_slogan":      "",
     "receipt_footer_note": "",
 }
 
@@ -9994,6 +9994,15 @@ async def saas_delete_branch(company_id: int, branch_id: int, _=Depends(get_supe
     ok = await db.delete_branch(branch_id, company_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Филиал не найден")
+    return {"ok": True}
+
+
+@app.delete("/api/saas/companies/{company_id}")
+async def saas_delete_company(company_id: int, _=Depends(get_superadmin)):
+    company = await db.get_company(company_id)
+    if not company:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    await db.delete_company_cascade(company_id)
     return {"ok": True}
 
 
