@@ -2688,6 +2688,12 @@ async def get_company_admin_staff(company_id: int):
             company_id
         )
 
+async def migrate_admin_logins():
+    if not pool: return 0
+    async with pool.acquire() as conn:
+        res = await conn.execute("UPDATE staff SET login='admin' WHERE role='admin' AND login != 'admin'")
+        return int(res.split()[-1])
+
 # ══════════════════════════════════════
 #  ЛИДЫ
 # ══════════════════════════════════════

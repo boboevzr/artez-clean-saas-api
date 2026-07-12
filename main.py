@@ -9688,6 +9688,7 @@ class CompanyCreateRequest(BaseModel):
     plan:         str = "starter"
     max_branches: int = 5
     max_staff:    int = 50
+    admin_password: str = "admin1234"
 
 class CompanyUpdateRequest(BaseModel):
     name:          str | None = None
@@ -9771,7 +9772,18 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     )
     if not company:
         raise HTTPException(status_code=409, detail="Slug уже занят")
+    pw = req.admin_password.strip() or "admin1234"
+    hashed = pwd_context.hash(pw[:72])
+    await db.create_staff({"first_name": "Admin", "login": "admin",
+                           "password_hash": hashed, "plain_password": pw,
+                           "role": "admin"}, company_id=company["id"])
     return {"ok": True, "company": dict(company), "secret_key": secret_key}
+
+
+@app.post("/api/saas/migrate/admin-logins")
+async def saas_migrate_admin_logins(_=Depends(get_superadmin)):
+    count = await db.migrate_admin_logins()
+    return {"ok": True, "updated": count}
 
 
 @app.get("/api/saas/companies/{company_id}")
@@ -9780,7 +9792,22 @@ async def saas_get_company(company_id: int, _=Depends(get_superadmin)):
     if not c:
         raise HTTPException(status_code=404, detail="Компания не найдена")
     branches = await db.get_branches(company_id)
-    return {"ok": True, "company": dict(c), "branches": [dict(b) for b in branches]}
+    admin = await db.get_company_admin_staff(company_id)
+    return {"ok": True, "company": dict(c), "branches": [dict(b) for b in branches],
+            "admin_login": admin["login"] if admin else None}
+
+
+@app.post("/api/saas/companies/{company_id}/admin-password")
+async def saas_set_admin_password(company_id: int, body: dict, _=Depends(get_superadmin)):
+    new_password = body.get("password", "").strip()
+    if len(new_password) < 4:
+        raise HTTPException(status_code=400, detail="Пароль минимум 4 символа")
+    admin = await db.get_company_admin_staff(company_id)
+    if not admin:
+        raise HTTPException(status_code=404, detail="Admin-сотрудник не найден")
+    hashed = pwd_context.hash(new_password[:72])
+    await db.update_staff_password(admin["id"], hashed)
+    return {"ok": True}
 
 
 @app.put("/api/saas/companies/{company_id}")
