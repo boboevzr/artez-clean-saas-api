@@ -9906,6 +9906,15 @@ async def saas_update_global_settings(req: SaasGlobalSettingsRequest, _=Depends(
     return {"ok": True}
 
 
+@app.get("/api/company/info")
+async def company_info(staff=Depends(get_current_staff)):
+    company_id = staff.get("company_id") or 1
+    company = await db.get_company(company_id)
+    if not company:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    return {"ok": True, "id": company["id"], "name": company["name"], "slug": company["slug"]}
+
+
 # ── Филиалы (управляются company admin или superadmin) ──────────────────
 
 @app.get("/api/branches")
