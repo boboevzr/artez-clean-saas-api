@@ -9971,6 +9971,26 @@ async def branches_delete(branch_id: int, staff=Depends(get_current_staff)):
     if staff.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Только admin")
     company_id = staff.get("company_id") or 1
+    branches = await db.get_branches(company_id)
+    if len(branches) <= 1:
+        raise HTTPException(status_code=400, detail="Нельзя удалить единственный филиал")
+    min_id = min(b["id"] for b in branches)
+    if branch_id == min_id:
+        raise HTTPException(status_code=400, detail="Нельзя удалить основной филиал")
+    ok = await db.delete_branch(branch_id, company_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Филиал не найден")
+    return {"ok": True}
+
+
+@app.delete("/api/saas/companies/{company_id}/branches/{branch_id}")
+async def saas_delete_branch(company_id: int, branch_id: int, _=Depends(get_superadmin)):
+    branches = await db.get_branches(company_id)
+    if len(branches) <= 1:
+        raise HTTPException(status_code=400, detail="Нельзя удалить единственный филиал")
+    min_id = min(b["id"] for b in branches)
+    if branch_id == min_id:
+        raise HTTPException(status_code=400, detail="Нельзя удалить основной филиал")
     ok = await db.delete_branch(branch_id, company_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Филиал не найден")
