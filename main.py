@@ -994,14 +994,15 @@ async def get_current_staff(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Недействительный токен")
     if payload.get("type") == "superadmin":
         raise HTTPException(status_code=401, detail="Требуется токен сотрудника")
-    # Admin panel token — resolve to real admin staff record
+    # Admin panel token — resolve to real admin staff record (company_id from JWT)
     if payload.get("sub") == "admin":
-        admin_staff = await db.get_first_admin_staff()
+        company_id = payload.get("company_id", 1)
+        admin_staff = await db.get_company_admin_staff(company_id)
         if admin_staff:
             return dict(admin_staff)
         return {"id": None, "login": "admin", "role": "admin", "sub": "admin", "active": True,
                 "first_name": "Администратор", "last_name": None, "phone": None,
-                "branch": None, "tg_username": None, "position": None, "company_id": 1}
+                "branch": None, "tg_username": None, "position": None, "company_id": company_id}
     if payload.get("type") != "staff":
         raise HTTPException(status_code=401, detail="Требуется токен сотрудника")
     staff = await db.get_staff_by_id(int(payload["sub"]))
@@ -9772,12 +9773,29 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     )
     if not company:
         raise HTTPException(status_code=409, detail="Slug уже занят")
-    pw = req.admin_password.strip() or "admin1234"
+    pw = req.admin_password.strip() or "admin"
     hashed = pwd_context.hash(pw[:72])
     await db.create_staff({"first_name": "Admin", "login": "admin",
                            "password_hash": hashed, "plain_password": pw,
                            "role": "admin"}, company_id=company["id"])
+    await db.create_branch(company_id=company["id"], slug=slug, name_ru=req.name)
     return {"ok": True, "company": dict(company), "secret_key": secret_key}
+
+
+@app.post("/api/saas/companies/{company_id}/branches")
+async def saas_create_branch(company_id: int, body: dict, _=Depends(get_superadmin)):
+    name_ru = (body.get("name_ru") or "").strip()
+    slug    = (body.get("slug") or "").strip().lower()
+    if not name_ru or not slug:
+        raise HTTPException(status_code=400, detail="Укажите название и slug")
+    company  = await db.get_company(company_id)
+    existing = await db.get_branches(company_id)
+    if company and len(existing) >= (company["max_branches"] or 99):
+        raise HTTPException(status_code=400, detail=f"Лимит филиалов: {company['max_branches']}")
+    branch = await db.create_branch(company_id=company_id, slug=slug, name_ru=name_ru)
+    if not branch:
+        raise HTTPException(status_code=409, detail="Slug уже занят")
+    return {"ok": True, "branch": dict(branch)}
 
 
 @app.post("/api/saas/migrate/admin-logins")
