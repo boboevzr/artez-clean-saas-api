@@ -2680,6 +2680,14 @@ async def update_staff_password(staff_id: int, password_hash: str, plain: str = 
             staff_id, password_hash, plain
         )
 
+async def get_company_admin_staff(company_id: int):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT id, login FROM staff WHERE company_id=$1 AND role='admin' AND active=TRUE ORDER BY id LIMIT 1",
+            company_id
+        )
+
 # ══════════════════════════════════════
 #  ЛИДЫ
 # ══════════════════════════════════════
