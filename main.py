@@ -9691,6 +9691,7 @@ class CompanyCreateRequest(BaseModel):
 
 class CompanyUpdateRequest(BaseModel):
     name:          str | None = None
+    slug:          str | None = None
     plan:          str | None = None
     max_branches:  int | None = None
     max_staff:     int | None = None
