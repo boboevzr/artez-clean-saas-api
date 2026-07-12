@@ -1298,6 +1298,19 @@ async def create_tables():
             except Exception:
                 pass
 
+    # ── Шаг 25: ссылки TG-групп + telegram_group_id ───────────────────────
+    async with pool.acquire() as c:
+        for sql in [
+            "ALTER TABLE branches ADD COLUMN IF NOT EXISTS tg_leads_group_link      TEXT    DEFAULT NULL",
+            "ALTER TABLE branches ADD COLUMN IF NOT EXISTS tg_orders_channel_link   TEXT    DEFAULT NULL",
+            "ALTER TABLE branches ADD COLUMN IF NOT EXISTS tg_delivery_group_link   TEXT    DEFAULT NULL",
+            "ALTER TABLE branches ADD COLUMN IF NOT EXISTS telegram_group_id        BIGINT  DEFAULT NULL",
+        ]:
+            try:
+                await c.execute(sql)
+            except Exception:
+                pass
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -7161,7 +7174,9 @@ async def create_branch(company_id: int, slug: str, name_ru: str, name_uz: str =
                          tg_delivery_group_id=None, tg_orders_channel_id=None,
                          tg_leads_group_id=None, tg_delivery_channel_id=None,
                          tg_delivery_channel_link=None, telegram_link=None,
-                         admin_tg_link=None, whatsapp=None, instagram=None):
+                         admin_tg_link=None, whatsapp=None, instagram=None,
+                         tg_leads_group_link=None, tg_orders_channel_link=None,
+                         tg_delivery_group_link=None, telegram_group_id=None):
     if not pool: return None
     import json
     phones_json = json.dumps(phones or [])
@@ -7173,14 +7188,19 @@ async def create_branch(company_id: int, slug: str, name_ru: str, name_uz: str =
                      workshop_lat, workshop_lon,
                      tg_delivery_group_id, tg_orders_channel_id,
                      tg_leads_group_id, tg_delivery_channel_id, tg_delivery_channel_link,
-                     telegram_link, admin_tg_link, whatsapp, instagram, active)
-                VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,TRUE)
+                     telegram_link, admin_tg_link, whatsapp, instagram,
+                     tg_leads_group_link, tg_orders_channel_link,
+                     tg_delivery_group_link, telegram_group_id, active)
+                VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                        $19,$20,$21,$22,TRUE)
                 RETURNING *
             """, company_id, slug, name_ru, name_uz, lat, lon, phones_json,
                  workshop_lat, workshop_lon,
                  tg_delivery_group_id, tg_orders_channel_id,
                  tg_leads_group_id, tg_delivery_channel_id, tg_delivery_channel_link,
-                 telegram_link, admin_tg_link, whatsapp, instagram)
+                 telegram_link, admin_tg_link, whatsapp, instagram,
+                 tg_leads_group_link, tg_orders_channel_link,
+                 tg_delivery_group_link, telegram_group_id)
         except Exception:
             return None  # slug уже занят
 
@@ -7191,7 +7211,9 @@ async def update_branch(branch_id: int, company_id: int, updates: dict) -> bool:
                "workshop_lat", "workshop_lon",
                "tg_delivery_group_id", "tg_orders_channel_id",
                "tg_leads_group_id", "tg_delivery_channel_id", "tg_delivery_channel_link",
-               "telegram_link", "admin_tg_link", "whatsapp", "instagram", "active"}
+               "telegram_link", "admin_tg_link", "whatsapp", "instagram", "active",
+               "tg_leads_group_link", "tg_orders_channel_link",
+               "tg_delivery_group_link", "telegram_group_id"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields: return False
     # phones сериализуем в JSON

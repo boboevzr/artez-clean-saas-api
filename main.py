@@ -9715,7 +9715,7 @@ class BranchCreateRequest(BaseModel):
     lon:                       float | None = None
     workshop_lat:              float | None = None
     workshop_lon:              float | None = None
-    phones:                    list = []   # list of {n, receipt, site} or plain strings
+    phones:                    list = []
     tg_delivery_group_id:      int | None = None
     tg_orders_channel_id:      int | None = None
     tg_leads_group_id:         int | None = None
@@ -9725,6 +9725,10 @@ class BranchCreateRequest(BaseModel):
     admin_tg_link:             str | None = None
     whatsapp:                  str | None = None
     instagram:                 str | None = None
+    tg_leads_group_link:       str | None = None
+    tg_orders_channel_link:    str | None = None
+    tg_delivery_group_link:    str | None = None
+    telegram_group_id:         int | None = None
 
 class BranchUpdateRequest(BaseModel):
     name_ru:                   str | None = None
@@ -9744,6 +9748,10 @@ class BranchUpdateRequest(BaseModel):
     whatsapp:                  str | None = None
     instagram:                 str | None = None
     active:                    bool | None = None
+    tg_leads_group_link:       str | None = None
+    tg_orders_channel_link:    str | None = None
+    tg_delivery_group_link:    str | None = None
+    telegram_group_id:         int | None = None
 
 
 @app.post("/api/saas/auth")
@@ -9948,6 +9956,10 @@ async def branches_create(req: BranchCreateRequest, staff=Depends(get_current_st
         admin_tg_link=req.admin_tg_link,
         whatsapp=req.whatsapp,
         instagram=req.instagram,
+        tg_leads_group_link=req.tg_leads_group_link,
+        tg_orders_channel_link=req.tg_orders_channel_link,
+        tg_delivery_group_link=req.tg_delivery_group_link,
+        telegram_group_id=req.telegram_group_id,
     )
     if not branch:
         raise HTTPException(status_code=409, detail="Slug уже занят в этой компании")
