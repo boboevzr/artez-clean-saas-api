@@ -1052,6 +1052,7 @@ async def health():
 class StaffLoginRequest(BaseModel):
     login: str
     password: str
+    company_id: int = 1
 
 class StaffCreateRequest(BaseModel):
     first_name: str
@@ -1111,7 +1112,7 @@ def _staff_public(s: dict) -> dict:
 
 @app.post("/api/staff/login")
 async def staff_login(req: StaffLoginRequest):
-    staff = await db.get_staff_by_login(req.login)
+    staff = await db.get_staff_by_login(req.login, req.company_id)
     if not staff:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
@@ -3419,7 +3420,9 @@ async def notify_sheets_new_order(order_num: str, data: "OrderRequest"):
 #  ADMIN
 # ══════════════════════════════════════
 class AdminLoginRequest(BaseModel):
+    login: str
     password: str
+    company_id: int = 1
 
 class SetPriceRequest(BaseModel):
     service_key: str
@@ -3444,9 +3447,10 @@ class UnitRequest(BaseModel):
 
 ADMIN_TOKEN_PREFIX = "admin:"
 
-def create_admin_token() -> str:
+def create_admin_token(company_id: int = 1) -> str:
     payload = {
         "sub": "admin",
+        "company_id": company_id,
         "exp": datetime.now(timezone.utc) + timedelta(days=30),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -3465,9 +3469,12 @@ async def get_admin(authorization: str = Header(None)):
 
 @app.post("/api/admin/login")
 async def admin_login(req: AdminLoginRequest):
-    if not (apass := await get_admin_pass()) or req.password != apass:
-        raise HTTPException(status_code=401, detail="Неверный пароль")
-    return {"ok": True, "token": create_admin_token()}
+    staff = await db.get_staff_by_login(req.login, req.company_id)
+    if not staff or staff["role"] != "admin":
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    if not pwd_context.verify(req.password[:72], staff["password_hash"]):
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    return {"ok": True, "token": create_admin_token(req.company_id)}
 
 @app.post("/api/admin/change-master-password")
 async def change_master_password(body: dict, _=Depends(_get_admin)):

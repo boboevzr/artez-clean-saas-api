@@ -2029,11 +2029,12 @@ async def get_admin_orders(status: str = None, limit: int = 50):
 # ══════════════════════════════════════
 #  СОТРУДНИКИ
 # ══════════════════════════════════════
-async def get_staff_by_login(login: str):
+async def get_staff_by_login(login: str, company_id: int = 1):
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow(
-            "SELECT * FROM staff WHERE login=$1 AND active=TRUE", login
+            "SELECT * FROM staff WHERE login=$1 AND company_id=$2 AND active=TRUE",
+            login, company_id
         )
 
 async def get_staff_roles_by_logins(logins: list) -> dict:
