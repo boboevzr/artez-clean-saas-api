@@ -9691,7 +9691,9 @@ class BranchCreateRequest(BaseModel):
     name_uz:                   str = ""
     lat:                       float | None = None
     lon:                       float | None = None
-    phones:                    list[str] = []
+    workshop_lat:              float | None = None
+    workshop_lon:              float | None = None
+    phones:                    list = []   # list of {n, receipt, site} or plain strings
     tg_delivery_group_id:      int | None = None
     tg_orders_channel_id:      int | None = None
     tg_leads_group_id:         int | None = None
@@ -9707,7 +9709,9 @@ class BranchUpdateRequest(BaseModel):
     name_uz:                   str | None = None
     lat:                       float | None = None
     lon:                       float | None = None
-    phones:                    list[str] | None = None
+    workshop_lat:              float | None = None
+    workshop_lon:              float | None = None
+    phones:                    list | None = None
     tg_delivery_group_id:      int | None = None
     tg_orders_channel_id:      int | None = None
     tg_leads_group_id:         int | None = None
@@ -9845,6 +9849,7 @@ async def branches_create(req: BranchCreateRequest, staff=Depends(get_current_st
         company_id=company_id, slug=req.slug.lower().strip(),
         name_ru=req.name_ru, name_uz=req.name_uz,
         lat=req.lat, lon=req.lon, phones=req.phones,
+        workshop_lat=req.workshop_lat, workshop_lon=req.workshop_lon,
         tg_delivery_group_id=req.tg_delivery_group_id,
         tg_orders_channel_id=req.tg_orders_channel_id,
         tg_leads_group_id=req.tg_leads_group_id,
