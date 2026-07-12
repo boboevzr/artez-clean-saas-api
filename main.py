@@ -9844,13 +9844,6 @@ async def saas_update_company(company_id: int, req: CompanyUpdateRequest, _=Depe
     return {"ok": True}
 
 
-@app.delete("/api/saas/companies/{company_id}")
-async def saas_delete_company(company_id: int, _=Depends(get_superadmin)):
-    if company_id == 1:
-        raise HTTPException(status_code=400, detail="Нельзя удалить дефолтную компанию")
-    await db.delete_company(company_id)
-    return {"ok": True}
-
 
 @app.post("/api/saas/companies/{company_id}/regenerate-key")
 async def saas_regen_key(company_id: int, _=Depends(get_superadmin)):
