@@ -9775,10 +9775,16 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
         raise HTTPException(status_code=409, detail="Slug уже занят")
     pw = req.admin_password.strip() or "admin"
     hashed = pwd_context.hash(pw[:72])
-    await db.create_staff({"first_name": "Admin", "login": "admin",
-                           "password_hash": hashed, "plain_password": pw,
-                           "role": "admin"}, company_id=company["id"])
-    await db.create_branch(company_id=company["id"], slug=slug, name_ru=req.name)
+    try:
+        await db.create_staff({"first_name": "Admin", "login": "admin",
+                               "password_hash": hashed, "plain_password": pw,
+                               "role": "admin"}, company_id=company["id"])
+    except Exception:
+        pass  # admin staff already exists for this company
+    try:
+        await db.create_branch(company_id=company["id"], slug=slug, name_ru=req.name)
+    except Exception:
+        pass  # branch already exists
     return {"ok": True, "company": dict(company), "secret_key": secret_key}
 
 

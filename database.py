@@ -6267,6 +6267,12 @@ async def ensure_salary_ledger_table():
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS washed_at TIMESTAMPTZ DEFAULT NULL")
         await conn.execute(
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_at TIMESTAMPTZ DEFAULT NULL")
+        # Fix staff login uniqueness: per-company instead of global
+        await conn.execute("DROP INDEX IF EXISTS staff_login_unique")
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS staff_company_login_unique
+            ON staff(company_id, login) WHERE company_id IS NOT NULL
+        """)
 
 async def get_advance_max_percent() -> float:
     if not pool: return 50.0
