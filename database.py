@@ -2133,9 +2133,17 @@ async def get_all_staff():
             "SELECT * FROM staff WHERE company_id=$1 ORDER BY active DESC, first_name", cid
         )
 
-async def create_staff(data: dict) -> int:
+async def get_staff_by_company(company_id: int):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT id, first_name, last_name, login, role, active FROM staff WHERE company_id=$1 ORDER BY id",
+            company_id
+        )
+
+async def create_staff(data: dict, company_id: int | None = None) -> int:
     if not pool: return None
-    cid = _cid()
+    cid = company_id if company_id is not None else _cid()
     async with pool.acquire() as conn:
         return await conn.fetchval("""
             INSERT INTO staff (first_name, last_name, middle_name, phone, login, password_hash,

@@ -9788,6 +9788,40 @@ async def saas_regen_key(company_id: int, _=Depends(get_superadmin)):
     return {"ok": True, "secret_key": new_key}
 
 
+class SaasStaffCreateRequest(BaseModel):
+    first_name: str
+    last_name:  str = ""
+    login:      str
+    password:   str
+    role:       str = "admin"
+
+@app.post("/api/saas/companies/{company_id}/staff")
+async def saas_create_staff(company_id: int, req: SaasStaffCreateRequest, _=Depends(get_superadmin)):
+    c = await db.get_company(company_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    existing = await db.get_staff_by_login(req.login, company_id)
+    if existing:
+        raise HTTPException(status_code=400, detail="Логин уже занят")
+    hashed = pwd_context.hash(req.password[:72])
+    staff_id = await db.create_staff({
+        "first_name":    req.first_name,
+        "last_name":     req.last_name,
+        "login":         req.login,
+        "password_hash": hashed,
+        "plain_password": req.password,
+        "role":          req.role,
+    }, company_id=company_id)
+    return {"ok": True, "staff_id": staff_id}
+
+@app.get("/api/saas/companies/{company_id}/staff")
+async def saas_list_staff(company_id: int, _=Depends(get_superadmin)):
+    if not await db.get_company(company_id):
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    rows = await db.get_staff_by_company(company_id)
+    return {"ok": True, "staff": [dict(r) for r in rows]}
+
+
 # ── Филиалы (управляются company admin или superadmin) ──────────────────
 
 @app.get("/api/branches")
