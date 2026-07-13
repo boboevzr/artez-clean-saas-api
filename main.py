@@ -130,6 +130,7 @@ async def startup():
     asyncio.create_task(_route_rollover_worker())
     await db.ensure_sms_dispatch_table()
     await db.ensure_sms_operator_prices()
+    await db.ensure_saas_schema()
     asyncio.create_task(_sms_dispatch_worker())
     # Webhook не нужен — бот работает в режиме polling (ARTEZ-BOT сервис на Railway)
     # if BOT_TOKEN and APP_URL:
@@ -9784,7 +9785,16 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     if not company:
         raise HTTPException(status_code=409, detail="Slug уже занят")
     credentials = []
-    for first_name, login, role in [("Admin","admin","admin"), ("Менеджер","manager","manager"), ("Колл-центр","callcenter","callcenter")]:
+    # Первые 3 — для admin.html, следующие 4 — для staff.html
+    for first_name, login, role in [
+        ("Admin",       "admin",       "admin"),
+        ("Менеджер",    "manager",     "manager"),
+        ("Колл-центр",  "callcenter",  "callcenter"),
+        ("Водитель",    "driver",      "driver"),
+        ("Упаковщик",   "packer",      "packer"),
+        ("Логистика",   "logistics",   "logistics"),
+        ("Мойщик",      "washer",      "washer"),
+    ]:
         pw = login
         hashed = pwd_context.hash(pw[:72])
         try:
@@ -9980,6 +9990,78 @@ async def saas_update_global_settings(req: SaasGlobalSettingsRequest, _=Depends(
     if req.yandex_maps_key is not None:
         await db.set_config("yandex_maps_key", req.yandex_maps_key)
     return {"ok": True}
+
+
+# ── SAAS PLANS ──────────────────────────────────────────────────────────────
+
+@app.get("/api/saas/plans")
+async def saas_list_plans(_=Depends(get_superadmin)):
+    plans = await db.get_saas_plans()
+    return {"ok": True, "plans": plans}
+
+@app.put("/api/saas/plans/{plan_id}")
+async def saas_update_plan(plan_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    allowed = {"display_name", "max_branches", "max_staff", "base_price", "active", "sort_order"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(400, "Нет данных для обновления")
+    await db.update_saas_plan(plan_id, updates)
+    return {"ok": True}
+
+@app.put("/api/saas/plans/{plan_id}/pricing/{month}")
+async def saas_update_plan_pricing(plan_id: int, month: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    price = body.get("price")
+    if price is None or int(price) < 0:
+        raise HTTPException(400, "Укажите price")
+    await db.update_saas_plan_pricing(plan_id, month, int(price))
+    return {"ok": True}
+
+
+# ── SAAS SUBSCRIPTIONS ───────────────────────────────────────────────────────
+
+@app.get("/api/saas/companies/{company_id}/subscription")
+async def saas_get_subscription(company_id: int, _=Depends(get_superadmin)):
+    sub = await db.get_saas_subscription(company_id)
+    return {"ok": True, "subscription": dict(sub) if sub else None}
+
+@app.post("/api/saas/companies/{company_id}/subscription")
+async def saas_create_subscription(company_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    if not await db.get_company(company_id):
+        raise HTTPException(404, "Компания не найдена")
+    plan_id    = body.get("plan_id")
+    start_date = body.get("start_date")
+    end_date   = body.get("end_date")
+    notes      = body.get("notes")
+    if not plan_id or not start_date or not end_date:
+        raise HTTPException(400, "Укажите plan_id, start_date, end_date")
+    sub = await db.create_saas_subscription(company_id, plan_id, start_date, end_date, notes)
+    return {"ok": True, "subscription": dict(sub)}
+
+@app.put("/api/saas/companies/{company_id}/subscription/{sub_id}")
+async def saas_update_subscription(company_id: int, sub_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    allowed = {"status", "end_date", "balance", "notes"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    await db.update_saas_subscription(sub_id, updates)
+    return {"ok": True}
+
+
+# ── SAAS PAYMENTS ────────────────────────────────────────────────────────────
+
+@app.get("/api/saas/companies/{company_id}/payments")
+async def saas_get_payments(company_id: int, _=Depends(get_superadmin)):
+    payments = await db.get_saas_payments(company_id)
+    return {"ok": True, "payments": [dict(p) for p in payments]}
+
+@app.post("/api/saas/companies/{company_id}/payments")
+async def saas_add_payment(company_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    amount          = body.get("amount")
+    payment_date    = body.get("payment_date")
+    note            = body.get("note")
+    subscription_id = body.get("subscription_id")
+    if not amount or int(amount) <= 0:
+        raise HTTPException(400, "Укажите сумму")
+    payment = await db.add_saas_payment(company_id, subscription_id, int(amount), payment_date or None, note)
+    return {"ok": True, "payment": dict(payment)}
 
 
 @app.get("/api/company/info")

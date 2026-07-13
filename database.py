@@ -1322,6 +1322,71 @@ async def create_tables():
     logging.info("✅ API: Tables created/verified")
 
 
+async def ensure_saas_schema():
+    """Шаг 27: таблицы планов/подписок/оплат SaaS."""
+    if not pool:
+        return
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS saas_plans (
+            id           SERIAL PRIMARY KEY,
+            slug         VARCHAR(50)  UNIQUE NOT NULL,
+            display_name VARCHAR(100) NOT NULL,
+            max_branches INT          NOT NULL DEFAULT 1,
+            max_staff    INT          NOT NULL DEFAULT 7,
+            base_price   INT          NOT NULL DEFAULT 500000,
+            active       BOOLEAN      NOT NULL DEFAULT TRUE,
+            sort_order   INT          NOT NULL DEFAULT 0,
+            created_at   TIMESTAMPTZ  DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS saas_plan_pricing (
+            id      SERIAL PRIMARY KEY,
+            plan_id INT NOT NULL REFERENCES saas_plans(id) ON DELETE CASCADE,
+            month   INT NOT NULL CHECK (month BETWEEN 1 AND 12),
+            price   INT NOT NULL,
+            UNIQUE(plan_id, month)
+        );
+        CREATE TABLE IF NOT EXISTS saas_subscriptions (
+            id             SERIAL PRIMARY KEY,
+            company_id     INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            plan_id        INT NOT NULL REFERENCES saas_plans(id),
+            start_date     DATE NOT NULL,
+            end_date       DATE NOT NULL,
+            status         VARCHAR(20) NOT NULL DEFAULT 'active',
+            balance        INT         NOT NULL DEFAULT 0,
+            notes          TEXT,
+            created_at     TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS saas_payments (
+            id              SERIAL PRIMARY KEY,
+            company_id      INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            subscription_id INT REFERENCES saas_subscriptions(id) ON DELETE SET NULL,
+            amount          INT  NOT NULL,
+            payment_date    DATE NOT NULL DEFAULT CURRENT_DATE,
+            note            TEXT,
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        );
+        """)
+        # Засеять начальные планы только если таблица пустая
+        count = await c.fetchval("SELECT COUNT(*) FROM saas_plans")
+        if count == 0:
+            await c.execute("""
+            INSERT INTO saas_plans (slug, display_name, max_branches, max_staff, base_price, active, sort_order) VALUES
+            ('starter',      'Starter',  1, 7,  500000,  true, 10),
+            ('starter_plus', 'Starter+', 1, 15, 800000,  true, 20),
+            ('basic',        'Basic',    2, 10, 1200000, true, 30),
+            ('basic_plus',   'Basic+',   2, 20, 1500000, true, 40),
+            ('pro',          'Pro',      5, 40, 2000000, true, 50)
+            ON CONFLICT (slug) DO NOTHING;
+            """)
+            await c.execute("""
+            INSERT INTO saas_plan_pricing (plan_id, month, price)
+            SELECT id, m, base_price FROM saas_plans CROSS JOIN generate_series(1, 12) AS m
+            ON CONFLICT (plan_id, month) DO NOTHING;
+            """)
+    logging.info("✅ API: SaaS schema (step 27) ready")
+
+
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
 # ══════════════════════════════════════
@@ -7247,3 +7312,125 @@ async def delete_branch(branch_id: int, company_id: int) -> bool:
             "DELETE FROM branches WHERE id=$1 AND company_id=$2", branch_id, company_id
         )
         return result != "DELETE 0"
+
+
+# ══════════════════════════════════════
+#  SAAS PLANS / SUBSCRIPTIONS / PAYMENTS
+# ══════════════════════════════════════
+
+async def get_saas_plans():
+    """Список планов с месячными ценами."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        plans = await conn.fetch(
+            "SELECT * FROM saas_plans ORDER BY sort_order, id"
+        )
+        pricing = await conn.fetch(
+            "SELECT plan_id, month, price FROM saas_plan_pricing ORDER BY plan_id, month"
+        )
+    # Группируем месячные цены по plan_id
+    pricing_map: dict = {}
+    for row in pricing:
+        pricing_map.setdefault(row["plan_id"], {})[row["month"]] = row["price"]
+    result = []
+    for p in plans:
+        d = dict(p)
+        d["monthly_prices"] = pricing_map.get(p["id"], {})
+        result.append(d)
+    return result
+
+
+async def update_saas_plan(plan_id: int, updates: dict):
+    if not pool: return
+    allowed = {"display_name", "max_branches", "max_staff", "base_price", "active", "sort_order"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return
+    params = [plan_id]
+    sets = []
+    for k, v in fields.items():
+        params.append(v)
+        sets.append(f"{k}=${len(params)}")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE saas_plans SET {', '.join(sets)} WHERE id=$1", *params
+        )
+
+
+async def update_saas_plan_pricing(plan_id: int, month: int, price: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO saas_plan_pricing (plan_id, month, price)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (plan_id, month) DO UPDATE SET price = EXCLUDED.price
+        """, plan_id, month, price)
+
+
+async def get_saas_subscription(company_id: int):
+    """Текущая активная (или последняя) подписка компании с данными плана."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("""
+            SELECT s.*, p.slug AS plan_slug, p.display_name AS plan_name,
+                   p.max_branches, p.max_staff, p.base_price
+            FROM saas_subscriptions s
+            JOIN saas_plans p ON p.id = s.plan_id
+            WHERE s.company_id = $1
+            ORDER BY s.created_at DESC
+            LIMIT 1
+        """, company_id)
+
+
+async def create_saas_subscription(company_id: int, plan_id: int,
+                                   start_date, end_date, notes=None):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("""
+            INSERT INTO saas_subscriptions (company_id, plan_id, start_date, end_date, notes)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+        """, company_id, plan_id, start_date, end_date, notes)
+
+
+async def update_saas_subscription(sub_id: int, updates: dict):
+    if not pool: return
+    allowed = {"status", "end_date", "balance", "notes"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return
+    params = [sub_id]
+    sets = []
+    for k, v in fields.items():
+        params.append(v)
+        sets.append(f"{k}=${len(params)}")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE saas_subscriptions SET {', '.join(sets)} WHERE id=$1", *params
+        )
+
+
+async def get_saas_payments(company_id: int):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch("""
+            SELECT * FROM saas_payments
+            WHERE company_id = $1
+            ORDER BY payment_date DESC, id DESC
+        """, company_id)
+
+
+async def add_saas_payment(company_id: int, subscription_id, amount: int,
+                           payment_date=None, note=None):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow("""
+                INSERT INTO saas_payments (company_id, subscription_id, amount, payment_date, note)
+                VALUES ($1, $2, $3, COALESCE($4::date, CURRENT_DATE), $5)
+                RETURNING *
+            """, company_id, subscription_id, amount, payment_date, note)
+            if subscription_id:
+                await conn.execute(
+                    "UPDATE saas_subscriptions SET balance = balance + $1 WHERE id = $2",
+                    amount, subscription_id
+                )
+            return row
