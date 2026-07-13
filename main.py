@@ -9783,19 +9783,22 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     )
     if not company:
         raise HTTPException(status_code=409, detail="Slug уже занят")
-    pw = req.admin_password.strip() or "admin"
-    hashed = pwd_context.hash(pw[:72])
-    try:
-        await db.create_staff({"first_name": "Admin", "login": "admin",
-                               "password_hash": hashed, "plain_password": pw,
-                               "role": "admin"}, company_id=company["id"])
-    except Exception:
-        pass  # admin staff already exists for this company
+    credentials = []
+    for first_name, login, role in [("Admin","admin","admin"), ("Менеджер","manager","manager"), ("Колл-центр","callcenter","callcenter")]:
+        pw = login
+        hashed = pwd_context.hash(pw[:72])
+        try:
+            await db.create_staff({"first_name": first_name, "login": login,
+                                   "password_hash": hashed, "plain_password": pw,
+                                   "role": role}, company_id=company["id"])
+            credentials.append({"role": role, "login": login, "password": pw})
+        except Exception:
+            pass
     try:
         await db.create_branch(company_id=company["id"], slug=slug, name_ru=req.name)
     except Exception:
-        pass  # branch already exists
-    return {"ok": True, "company": dict(company), "secret_key": secret_key}
+        pass
+    return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
 @app.post("/api/saas/companies/{company_id}/branches")
@@ -9912,6 +9915,55 @@ async def saas_list_staff(company_id: int, _=Depends(get_superadmin)):
         raise HTTPException(status_code=404, detail="Компания не найдена")
     rows = await db.get_staff_by_company(company_id)
     return {"ok": True, "staff": [dict(r) for r in rows]}
+
+
+@app.put("/api/saas/companies/{company_id}/branches/{branch_id}")
+async def saas_update_branch(company_id: int, branch_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    if not await db.get_company(company_id):
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    await db.update_branch(branch_id, company_id, body)
+    return {"ok": True}
+
+
+@app.put("/api/saas/companies/{company_id}/staff/{staff_id}")
+async def saas_update_staff(company_id: int, staff_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    if not await db.get_company(company_id):
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    async with db.pool.acquire() as conn:
+        s = await conn.fetchrow("SELECT id FROM staff WHERE id=$1 AND company_id=$2", staff_id, company_id)
+        if not s:
+            raise HTTPException(status_code=404, detail="Сотрудник не найден")
+        allowed = {"first_name","last_name","login","role"}
+        fields = {k: v for k, v in body.items() if k in allowed and v is not None}
+        if fields:
+            sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+            await conn.execute(
+                f"UPDATE staff SET {sets}, updated_at=NOW() WHERE id=$1 AND company_id=${len(fields)+2}",
+                staff_id, *fields.values(), company_id
+            )
+    password = body.get("password", "")
+    if password and len(password) >= 4:
+        hashed = pwd_context.hash(password[:72])
+        await db.update_staff_password(staff_id, hashed, password)
+    return {"ok": True}
+
+
+@app.delete("/api/saas/companies/{company_id}/staff/{staff_id}")
+async def saas_delete_staff(company_id: int, staff_id: int, _=Depends(get_superadmin)):
+    if not await db.get_company(company_id):
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    async with db.pool.acquire() as conn:
+        s = await conn.fetchrow("SELECT role FROM staff WHERE id=$1 AND company_id=$2", staff_id, company_id)
+        if not s:
+            raise HTTPException(status_code=404, detail="Сотрудник не найден")
+        if s["role"] == "admin":
+            cnt = await conn.fetchval(
+                "SELECT COUNT(*) FROM staff WHERE company_id=$1 AND role='admin'", company_id
+            )
+            if cnt <= 1:
+                raise HTTPException(status_code=400, detail="Нельзя удалить последнего admin")
+        await conn.execute("DELETE FROM staff WHERE id=$1 AND company_id=$2", staff_id, company_id)
+    return {"ok": True}
 
 
 class SaasGlobalSettingsRequest(BaseModel):

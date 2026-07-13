@@ -2187,7 +2187,7 @@ async def get_staff_by_company(company_id: int):
     if not pool: return []
     async with pool.acquire() as conn:
         return await conn.fetch(
-            "SELECT id, first_name, last_name, login, role, active FROM staff WHERE company_id=$1 ORDER BY id",
+            "SELECT id, first_name, last_name, login, plain_password, role, active FROM staff WHERE company_id=$1 ORDER BY id",
             company_id
         )
 
