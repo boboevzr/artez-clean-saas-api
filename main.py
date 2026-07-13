@@ -9865,6 +9865,22 @@ async def saas_impersonate_company(company_id: int, _=Depends(get_superadmin)):
     return {"ok": True, "token": token, "company_name": c["name"], "slug": c["slug"]}
 
 
+@app.get("/api/saas/companies/{company_id}/config")
+async def saas_get_company_config(company_id: int, _=Depends(get_superadmin)):
+    keys = ["contact_short", "contact_main"]
+    result = {k: await db.get_config_for_company(k, company_id) or "" for k in keys}
+    return {"ok": True, "config": result}
+
+
+@app.put("/api/saas/companies/{company_id}/config")
+async def saas_update_company_config(company_id: int, body: dict, _=Depends(get_superadmin)):
+    allowed = {"contact_short", "contact_main"}
+    for key, val in body.items():
+        if key in allowed:
+            await db.set_config_for_company(key, str(val), company_id)
+    return {"ok": True}
+
+
 @app.post("/api/saas/companies/{company_id}/admin-password")
 async def saas_set_admin_password(company_id: int, body: dict, _=Depends(get_superadmin)):
     new_password = body.get("password", "").strip()

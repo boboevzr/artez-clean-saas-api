@@ -1680,6 +1680,21 @@ async def set_config(key: str, value: str):
         """, key, value, cid)
 
 
+async def get_config_for_company(key: str, company_id: int) -> str | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT value FROM config WHERE key=$1 AND company_id=$2", key, company_id)
+
+
+async def set_config_for_company(key: str, value: str, company_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO config (key, value, company_id, updated_at) VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, key, value, company_id)
+
+
 # ══════════════════════════════════════
 #  ЗАКАЗЫ КЛИЕНТА (для личного кабинета)
 # ══════════════════════════════════════
