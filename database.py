@@ -101,6 +101,7 @@ async def create_tables():
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS legal_name    VARCHAR(300) DEFAULT NULL;
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT NULL;
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS notes         TEXT         DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_days   INT          DEFAULT 14;
         CREATE TABLE IF NOT EXISTS branches (
             id                   SERIAL PRIMARY KEY,
             company_id           INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -7229,7 +7230,7 @@ async def create_company(name: str, slug: str, secret_key: str,
 
 async def update_company(company_id: int, updates: dict):
     if not pool or not updates: return
-    allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active", "timezone"}
+    allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active", "timezone", "trial_days"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields: return
     cols = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
@@ -7406,17 +7407,31 @@ async def get_saas_subscription(company_id: int):
 
 
 async def create_saas_subscription(company_id: int, plan_id: int,
-                                   start_date, end_date, notes=None):
+                                   start_date, end_date, notes=None, status='active'):
     if not pool: return None
     from datetime import date as _date
     if isinstance(start_date, str): start_date = _date.fromisoformat(start_date)
     if isinstance(end_date, str):   end_date   = _date.fromisoformat(end_date)
     async with pool.acquire() as conn:
         return await conn.fetchrow("""
-            INSERT INTO saas_subscriptions (company_id, plan_id, start_date, end_date, notes)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO saas_subscriptions (company_id, plan_id, start_date, end_date, notes, status)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *
-        """, company_id, plan_id, start_date, end_date, notes)
+        """, company_id, plan_id, start_date, end_date, notes, status)
+
+
+async def get_saas_subscriptions_all(company_id: int):
+    """Все подписки компании (история) с данными плана, новые первыми."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch("""
+            SELECT s.*, p.slug AS plan_slug, p.display_name AS plan_name,
+                   p.max_branches, p.max_staff
+            FROM saas_subscriptions s
+            JOIN saas_plans p ON p.id = s.plan_id
+            WHERE s.company_id = $1
+            ORDER BY s.created_at DESC
+        """, company_id)
 
 
 async def update_saas_subscription(sub_id: int, updates: dict):

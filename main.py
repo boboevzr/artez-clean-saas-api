@@ -9714,6 +9714,7 @@ class CompanyUpdateRequest(BaseModel):
     legal_name:    str | None = None
     address:       str | None = None
     notes:         str | None = None
+    trial_days:    int | None = None
 
 class BranchCreateRequest(BaseModel):
     slug:                      str
@@ -9847,7 +9848,8 @@ async def saas_get_company(company_id: int, _=Depends(get_superadmin)):
         raise HTTPException(status_code=404, detail="Компания не найдена")
     branches = await db.get_branches(company_id)
     admin = await db.get_company_admin_staff(company_id)
-    return {"ok": True, "company": dict(c), "branches": [dict(b) for b in branches],
+    return {"ok": True, "company": {**dict(c), "trial_days": c.get("trial_days") or 14},
+            "branches": [dict(b) for b in branches],
             "admin_login":    admin["login"]          if admin else None,
             "admin_password": admin["plain_password"] if admin else None}
 
@@ -10051,6 +10053,11 @@ async def saas_get_subscription(company_id: int, _=Depends(get_superadmin)):
     sub = await db.get_saas_subscription(company_id)
     return {"ok": True, "subscription": dict(sub) if sub else None}
 
+@app.get("/api/saas/companies/{company_id}/subscriptions")
+async def saas_get_subscriptions_all(company_id: int, _=Depends(get_superadmin)):
+    subs = await db.get_saas_subscriptions_all(company_id)
+    return {"ok": True, "subscriptions": [dict(s) for s in subs]}
+
 @app.post("/api/saas/companies/{company_id}/subscription")
 async def saas_create_subscription(company_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
     if not await db.get_company(company_id):
@@ -10059,9 +10066,10 @@ async def saas_create_subscription(company_id: int, body: dict = Body(...), _=De
     start_date = body.get("start_date")
     end_date   = body.get("end_date")
     notes      = body.get("notes")
+    status     = body.get("status", "active")
     if not plan_id or not start_date or not end_date:
         raise HTTPException(400, "Укажите plan_id, start_date, end_date")
-    sub = await db.create_saas_subscription(company_id, plan_id, start_date, end_date, notes)
+    sub = await db.create_saas_subscription(company_id, plan_id, start_date, end_date, notes, status)
     return {"ok": True, "subscription": dict(sub)}
 
 @app.put("/api/saas/companies/{company_id}/subscription/{sub_id}")
