@@ -2480,13 +2480,13 @@ class ClientCreateRequest(BaseModel):
 # ── Admin auth helpers (defined early so they can be used anywhere below) ──────
 
 async def _get_admin(authorization: str = Header(None)):
-    """Проверяет admin JWT (sub='admin')."""
+    """Проверяет admin JWT (sub='admin') или staff JWT с role='admin'."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Не авторизован")
     token = authorization.removeprefix("Bearer ").strip()
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if payload.get("sub") != "admin":
+        if payload.get("sub") != "admin" and payload.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Нет доступа")
     except JWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен")
@@ -3477,7 +3477,7 @@ async def get_admin(authorization: str = Header(None)):
     token = authorization.removeprefix("Bearer ").strip()
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if payload.get("sub") != "admin":
+        if payload.get("sub") != "admin" and payload.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Нет доступа")
     except JWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен")
