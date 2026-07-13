@@ -9828,7 +9828,21 @@ async def saas_get_company(company_id: int, _=Depends(get_superadmin)):
     branches = await db.get_branches(company_id)
     admin = await db.get_company_admin_staff(company_id)
     return {"ok": True, "company": dict(c), "branches": [dict(b) for b in branches],
-            "admin_login": admin["login"] if admin else None}
+            "admin_login":    admin["login"]          if admin else None,
+            "admin_password": admin["plain_password"] if admin else None}
+
+
+@app.post("/api/saas/companies/{company_id}/impersonate")
+async def saas_impersonate_company(company_id: int, _=Depends(get_superadmin)):
+    """Получить staff-токен для входа в admin.html как admin данной компании."""
+    c = await db.get_company(company_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    admin = await db.get_company_admin_staff(company_id)
+    if not admin:
+        raise HTTPException(status_code=404, detail="Admin-сотрудник не найден")
+    token = create_staff_token(admin["id"], admin["login"], admin["role"], company_id)
+    return {"ok": True, "token": token, "company_name": c["name"], "slug": c["slug"]}
 
 
 @app.post("/api/saas/companies/{company_id}/admin-password")
