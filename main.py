@@ -9729,6 +9729,7 @@ class BranchCreateRequest(BaseModel):
     tg_orders_channel_link:    str | None = None
     tg_delivery_group_link:    str | None = None
     telegram_group_id:         int | None = None
+    admin_tg_id:               int | None = None
 
 class BranchUpdateRequest(BaseModel):
     name_ru:                   str | None = None
@@ -9752,6 +9753,7 @@ class BranchUpdateRequest(BaseModel):
     tg_orders_channel_link:    str | None = None
     tg_delivery_group_link:    str | None = None
     telegram_group_id:         int | None = None
+    admin_tg_id:               int | None = None
 
 
 @app.post("/api/saas/auth")
@@ -9960,6 +9962,7 @@ async def branches_create(req: BranchCreateRequest, staff=Depends(get_current_st
         tg_orders_channel_link=req.tg_orders_channel_link,
         tg_delivery_group_link=req.tg_delivery_group_link,
         telegram_group_id=req.telegram_group_id,
+        admin_tg_id=req.admin_tg_id,
     )
     if not branch:
         raise HTTPException(status_code=409, detail="Slug уже занят в этой компании")
@@ -10078,4 +10081,40 @@ async def company_settings_update(req: CompanySettingsRequest, staff=Depends(get
         updates["timezone"] = req.timezone
     if updates:
         await db.update_company(company_id, updates)
+    return {"ok": True}
+
+
+_ROLE_PERMS_DEFAULT = {
+    "manager": ["dashboard","plans","leads","orders","routes","cash","promotions",
+                "clients","contacts","site-users",
+                "autodial-groups","autodial-campaigns","autodial-greetings","autodial-settings",
+                "timesheet","workon","salary-calc","agent-monitoring",
+                "prices","units","expenses-admin","chat-templates"],
+    "callcenter": ["dashboard","leads","orders","clients","contacts"]
+}
+
+
+@app.get("/api/settings/role-permissions")
+async def get_role_permissions(staff=Depends(get_current_staff)):
+    company_id = staff.get("company_id") or 1
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT role_permissions FROM settings WHERE company_id=$1", company_id
+        )
+    if row and row["role_permissions"]:
+        return {"ok": True, "permissions": dict(row["role_permissions"])}
+    return {"ok": True, "permissions": _ROLE_PERMS_DEFAULT}
+
+
+@app.put("/api/settings/role-permissions")
+async def save_role_permissions(body: dict = Body(...), staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    import json as _json
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE settings SET role_permissions=$1::jsonb WHERE company_id=$2",
+            _json.dumps(body), company_id
+        )
     return {"ok": True}
