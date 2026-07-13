@@ -2256,6 +2256,15 @@ async def get_staff_by_company(company_id: int):
             company_id
         )
 
+async def count_staff_by_company(company_id: int) -> int:
+    if not pool: return 0
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS cnt FROM staff WHERE company_id=$1 AND fired IS NOT TRUE",
+            company_id
+        )
+        return row["cnt"] if row else 0
+
 async def create_staff(data: dict, company_id: int | None = None) -> int:
     if not pool: return None
     cid = company_id if company_id is not None else _cid()
@@ -7298,7 +7307,7 @@ async def update_branch(branch_id: int, company_id: int, updates: dict) -> bool:
     set_parts = []
     for k, v in fields.items():
         params.append(v)
-        cast = "::jsonb" if k == "phones" else ""
+        cast = "::text::jsonb" if k == "phones" else ""
         set_parts.append(f"{k}=${len(params)}{cast}")
     sql = f"UPDATE branches SET {', '.join(set_parts)} WHERE id=$1 AND company_id=$2"
     async with pool.acquire() as conn:
@@ -7384,6 +7393,9 @@ async def get_saas_subscription(company_id: int):
 async def create_saas_subscription(company_id: int, plan_id: int,
                                    start_date, end_date, notes=None):
     if not pool: return None
+    from datetime import date as _date
+    if isinstance(start_date, str): start_date = _date.fromisoformat(start_date)
+    if isinstance(end_date, str):   end_date   = _date.fromisoformat(end_date)
     async with pool.acquire() as conn:
         return await conn.fetchrow("""
             INSERT INTO saas_subscriptions (company_id, plan_id, start_date, end_date, notes)
@@ -7394,9 +7406,12 @@ async def create_saas_subscription(company_id: int, plan_id: int,
 
 async def update_saas_subscription(sub_id: int, updates: dict):
     if not pool: return
+    from datetime import date as _date
     allowed = {"status", "end_date", "balance", "notes"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields: return
+    if "end_date" in fields and isinstance(fields["end_date"], str):
+        fields["end_date"] = _date.fromisoformat(fields["end_date"])
     params = [sub_id]
     sets = []
     for k, v in fields.items():
@@ -7421,11 +7436,16 @@ async def get_saas_payments(company_id: int):
 async def add_saas_payment(company_id: int, subscription_id, amount: int,
                            payment_date=None, note=None):
     if not pool: return None
+    from datetime import date as _date
+    if isinstance(payment_date, str) and payment_date:
+        payment_date = _date.fromisoformat(payment_date)
+    elif not payment_date:
+        payment_date = _date.today()
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow("""
                 INSERT INTO saas_payments (company_id, subscription_id, amount, payment_date, note)
-                VALUES ($1, $2, $3, COALESCE($4::date, CURRENT_DATE), $5)
+                VALUES ($1, $2, $3, $4, $5)
                 RETURNING *
             """, company_id, subscription_id, amount, payment_date, note)
             if subscription_id:

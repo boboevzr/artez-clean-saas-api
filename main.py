@@ -1155,9 +1155,16 @@ async def staff_list(role: str = None, _=Depends(get_current_staff)):
     return {"ok": True, "staff": staff}
 
 @app.post("/api/staff/create")
-async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))):
+async def staff_create(req: StaffCreateRequest, me=Depends(get_current_staff)):
     from datetime import date as date_type
     import traceback
+    company_id = me.get("company_id") or 1
+    company = await db.get_company(company_id)
+    if company:
+        max_staff = company.get("max_staff") or 999
+        current_count = await db.count_staff_by_company(company_id)
+        if current_count >= max_staff:
+            raise HTTPException(status_code=400, detail=f"Лимит сотрудников по тарифу: {max_staff}. Перейдите на более высокий план.")
     hashed = pwd_context.hash(req.password[:72])
     hire = None
     if req.hire_date:
@@ -9905,6 +9912,10 @@ async def saas_create_staff(company_id: int, req: SaasStaffCreateRequest, _=Depe
     c = await db.get_company(company_id)
     if not c:
         raise HTTPException(status_code=404, detail="Компания не найдена")
+    max_staff = c.get("max_staff") or 999
+    current_count = await db.count_staff_by_company(company_id)
+    if current_count >= max_staff:
+        raise HTTPException(status_code=400, detail=f"Лимит сотрудников: {max_staff}")
     existing = await db.get_staff_by_login(req.login, company_id)
     if existing:
         raise HTTPException(status_code=400, detail="Логин уже занят")
