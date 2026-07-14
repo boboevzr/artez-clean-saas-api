@@ -4862,6 +4862,27 @@ async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename:
         logging.warning(f"_send_tg_cash error: {e}")
 
 
+@app.get("/api/tg/chat-info")
+async def tg_chat_info(chat_id: int, current_staff=Depends(get_current_staff)):
+    if not BOT_TOKEN:
+        raise HTTPException(400, detail="BOT_TOKEN не настроен")
+    async with aiohttp.ClientSession() as s:
+        async with s.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getChat",
+            params={"chat_id": chat_id},
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            data = await r.json()
+    if not data.get("ok"):
+        raise HTTPException(400, detail=data.get("description", "ID неверный или бот не является участником группы/канала"))
+    chat = data["result"]
+    return {
+        "title": chat.get("title") or chat.get("first_name") or "",
+        "type": chat.get("type", ""),
+        "username": chat.get("username"),
+    }
+
+
 @app.post("/api/tg/webhook")
 async def tg_webhook(request: Request):
     """Единый обработчик всех callback-кнопок Telegram (take_lead, chk:, accept_, reject_)."""
