@@ -9732,21 +9732,29 @@ class CompanyCreateRequest(BaseModel):
     admin_password: str = "admin1234"
 
 class CompanyUpdateRequest(BaseModel):
-    name:          str | None = None
-    slug:          str | None = None
-    plan:          str | None = None
-    max_branches:  int | None = None
-    max_staff:     int | None = None
-    active:        bool | None = None
-    timezone:      str | None = None
-    contact_name:  str | None = None
-    contact_phone: str | None = None
-    contact_email: str | None = None
-    inn:           str | None = None
-    legal_name:    str | None = None
-    address:       str | None = None
-    notes:         str | None = None
-    trial_days:    int | None = None
+    name:             str | None = None
+    slug:             str | None = None
+    plan:             str | None = None
+    max_branches:     int | None = None
+    max_staff:        int | None = None
+    active:           bool | None = None
+    timezone:         str | None = None
+    contact_name:     str | None = None
+    contact_phone:    str | None = None
+    contact_email:    str | None = None
+    inn:              str | None = None
+    legal_name:       str | None = None
+    address:          str | None = None
+    notes:            str | None = None
+    trial_days:       int | None = None
+    whatsapp:         str | None = None
+    instagram:        str | None = None
+    tg_group_link:    str | None = None
+    tg_group_id:      int | None = None
+    tg_channel_link:  str | None = None
+    tg_channel_id:    int | None = None
+    tg_admin_link:    str | None = None
+    tg_admin_id:      int | None = None
 
 class BranchCreateRequest(BaseModel):
     slug:                      str
@@ -10149,7 +10157,37 @@ async def company_info(staff=Depends(get_current_staff)):
     company = await db.get_company(company_id)
     if not company:
         raise HTTPException(status_code=404, detail="Компания не найдена")
-    return {"ok": True, "id": company["id"], "name": company["name"], "slug": company["slug"]}
+    return {
+        "ok": True, "id": company["id"], "name": company["name"], "slug": company["slug"],
+        "whatsapp":        company.get("whatsapp"),
+        "instagram":       company.get("instagram"),
+        "tg_group_link":   company.get("tg_group_link"),
+        "tg_group_id":     company.get("tg_group_id"),
+        "tg_channel_link": company.get("tg_channel_link"),
+        "tg_channel_id":   company.get("tg_channel_id"),
+        "tg_admin_link":   company.get("tg_admin_link"),
+        "tg_admin_id":     company.get("tg_admin_id"),
+    }
+
+
+class CompanySocialRequest(BaseModel):
+    whatsapp:        str | None = None
+    instagram:       str | None = None
+    tg_group_link:   str | None = None
+    tg_group_id:     int | None = None
+    tg_channel_link: str | None = None
+    tg_channel_id:   int | None = None
+    tg_admin_link:   str | None = None
+    tg_admin_id:     int | None = None
+
+@app.put("/api/company/contacts")
+async def company_update_contacts(req: CompanySocialRequest, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    updates = {k: v for k, v in req.model_dump().items()}
+    await db.update_company(company_id, updates)
+    return {"ok": True}
 
 
 # ── Филиалы (управляются company admin или superadmin) ──────────────────

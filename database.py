@@ -101,7 +101,15 @@ async def create_tables():
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS legal_name    VARCHAR(300) DEFAULT NULL;
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT NULL;
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS notes         TEXT         DEFAULT NULL;
-        ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_days   INT          DEFAULT 14;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_days      INT          DEFAULT 14;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp        TEXT         DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS instagram       TEXT         DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_group_link   TEXT         DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_group_id     BIGINT       DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_channel_link TEXT         DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_channel_id   BIGINT       DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_admin_link   TEXT         DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_admin_id     BIGINT       DEFAULT NULL;
         CREATE TABLE IF NOT EXISTS branches (
             id                   SERIAL PRIMARY KEY,
             company_id           INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -7231,7 +7239,9 @@ async def create_company(name: str, slug: str, secret_key: str,
 async def update_company(company_id: int, updates: dict):
     if not pool or not updates: return
     allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active", "timezone", "trial_days",
-               "legal_name", "inn", "address", "contact_name", "contact_phone", "contact_email", "notes"}
+               "legal_name", "inn", "address", "contact_name", "contact_phone", "contact_email", "notes",
+               "whatsapp", "instagram", "tg_group_link", "tg_group_id", "tg_channel_link", "tg_channel_id",
+               "tg_admin_link", "tg_admin_id"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields: return
     cols = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
