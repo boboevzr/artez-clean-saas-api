@@ -10131,6 +10131,18 @@ async def saas_add_payment(company_id: int, body: dict = Body(...), _=Depends(ge
     return {"ok": True, "payment": dict(payment)}
 
 
+@app.get("/api/company/resolve")
+async def company_resolve(slug: str):
+    """Публичный эндпоинт: slug → {name} для формы входа."""
+    company_id = await db.get_company_id_by_slug(slug.strip().lower())
+    if not company_id:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    company = await db.get_company(company_id)
+    if not company or not company.get("active"):
+        raise HTTPException(status_code=404, detail="Компания не найдена или отключена")
+    return {"name": company["name"], "slug": company["slug"]}
+
+
 @app.get("/api/company/info")
 async def company_info(staff=Depends(get_current_staff)):
     company_id = staff.get("company_id") or 1
