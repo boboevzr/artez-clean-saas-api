@@ -7230,7 +7230,8 @@ async def create_company(name: str, slug: str, secret_key: str,
 
 async def update_company(company_id: int, updates: dict):
     if not pool or not updates: return
-    allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active", "timezone", "trial_days"}
+    allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active", "timezone", "trial_days",
+               "legal_name", "inn", "address", "contact_name", "contact_phone", "contact_email", "notes"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields: return
     cols = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))

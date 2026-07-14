@@ -4863,7 +4863,18 @@ async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename:
 
 
 @app.get("/api/tg/chat-info")
-async def tg_chat_info(chat_id: int, _=Depends(get_admin)):
+async def tg_chat_info(chat_id: int, authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Токен недействителен")
+    role = payload.get("role", "")
+    sub  = payload.get("sub", "")
+    if sub != "superadmin" and role != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
     if not BOT_TOKEN:
         raise HTTPException(400, detail="BOT_TOKEN не настроен")
     async with aiohttp.ClientSession() as s:
