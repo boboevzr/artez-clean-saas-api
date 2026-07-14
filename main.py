@@ -9834,17 +9834,18 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
         raise HTTPException(status_code=409, detail="Slug уже занят")
     credentials = []
     # Уровень компании: без привязки к филиалу, доступ в admin-панель
-    for first_name, login, role in [
-        ("Admin",       "admin",       "admin"),
-        ("Менеджер",    "manager",     "manager"),
-        ("Колл-центр",  "callcenter",  "callcenter"),
+    for first_name, login, role, position in [
+        ("Admin",      "admin",      "admin",      "Администратор"),
+        ("Менеджер",   "manager",    "manager",    "Менеджер"),
+        ("Колл-центр", "callcenter", "callcenter", "Оператор колл-центра"),
     ]:
         pw = login
         hashed = pwd_context.hash(pw[:72])
         try:
             await db.create_staff({"first_name": first_name, "login": login,
                                    "password_hash": hashed, "plain_password": pw,
-                                   "role": role, "branch": None}, company_id=company["id"])
+                                   "role": role, "position": position, "branch": None},
+                                  company_id=company["id"])
             credentials.append({"level": "company", "role": role, "login": login, "password": pw})
         except Exception:
             pass
@@ -9854,18 +9855,19 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     except Exception:
         pass
     # Уровень филиала: привязаны к первому филиалу, без доступа в admin-панель
-    for first_name, login, role in [
-        ("Водитель",    "driver",      "driver"),
-        ("Упаковщик",   "packer",      "packer"),
-        ("Логистика",   "logistics",   "logistics"),
-        ("Мойщик",      "washer",      "washer"),
+    for first_name, login, role, position in [
+        ("Водитель",  "driver",    "driver",    "Водитель"),
+        ("Упаковщик", "packer",    "packer",    "Упаковщик"),
+        ("Логистика", "logistics", "logistics", "Логист"),
+        ("Мойщик",    "washer",    "washer",    "Мойщик"),
     ]:
         pw = login
         hashed = pwd_context.hash(pw[:72])
         try:
             await db.create_staff({"first_name": first_name, "login": login,
                                    "password_hash": hashed, "plain_password": pw,
-                                   "role": role, "branch": slug}, company_id=company["id"])
+                                   "role": role, "position": position, "branch": slug},
+                                  company_id=company["id"])
             credentials.append({"level": "branch", "role": role, "login": login, "password": pw, "branch": slug})
         except Exception:
             pass
