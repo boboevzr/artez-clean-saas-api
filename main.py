@@ -9833,7 +9833,7 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     if not company:
         raise HTTPException(status_code=409, detail="Slug уже занят")
     credentials = []
-    # Только 3 доступа для admin.html; остальных сотрудников добавляет admin компании сам
+    # Уровень компании: без привязки к филиалу, доступ в admin-панель
     for first_name, login, role in [
         ("Admin",       "admin",       "admin"),
         ("Менеджер",    "manager",     "manager"),
@@ -9844,14 +9844,31 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
         try:
             await db.create_staff({"first_name": first_name, "login": login,
                                    "password_hash": hashed, "plain_password": pw,
-                                   "role": role}, company_id=company["id"])
-            credentials.append({"role": role, "login": login, "password": pw})
+                                   "role": role, "branch": None}, company_id=company["id"])
+            credentials.append({"level": "company", "role": role, "login": login, "password": pw})
         except Exception:
             pass
+    # Создаём первый филиал
     try:
         await db.create_branch(company_id=company["id"], slug=slug, name_ru=req.name)
     except Exception:
         pass
+    # Уровень филиала: привязаны к первому филиалу, без доступа в admin-панель
+    for first_name, login, role in [
+        ("Водитель",    "driver",      "driver"),
+        ("Упаковщик",   "packer",      "packer"),
+        ("Логистика",   "logistics",   "logistics"),
+        ("Мойщик",      "washer",      "washer"),
+    ]:
+        pw = login
+        hashed = pwd_context.hash(pw[:72])
+        try:
+            await db.create_staff({"first_name": first_name, "login": login,
+                                   "password_hash": hashed, "plain_password": pw,
+                                   "role": role, "branch": slug}, company_id=company["id"])
+            credentials.append({"level": "branch", "role": role, "login": login, "password": pw, "branch": slug})
+        except Exception:
+            pass
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
