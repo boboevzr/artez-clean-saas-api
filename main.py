@@ -9833,15 +9833,11 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     if not company:
         raise HTTPException(status_code=409, detail="Slug уже занят")
     credentials = []
-    # Первые 3 — для admin.html, следующие 4 — для staff.html
+    # Только 3 доступа для admin.html; остальных сотрудников добавляет admin компании сам
     for first_name, login, role in [
         ("Admin",       "admin",       "admin"),
         ("Менеджер",    "manager",     "manager"),
         ("Колл-центр",  "callcenter",  "callcenter"),
-        ("Водитель",    "driver",      "driver"),
-        ("Упаковщик",   "packer",      "packer"),
-        ("Логистика",   "logistics",   "logistics"),
-        ("Мойщик",      "washer",      "washer"),
     ]:
         pw = login
         hashed = pwd_context.hash(pw[:72])
