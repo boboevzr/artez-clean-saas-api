@@ -4863,7 +4863,7 @@ async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename:
 
 
 @app.get("/api/tg/chat-info")
-async def tg_chat_info(chat_id: int, current_staff=Depends(get_current_staff)):
+async def tg_chat_info(chat_id: int, _=Depends(get_admin)):
     if not BOT_TOKEN:
         raise HTTPException(400, detail="BOT_TOKEN не настроен")
     async with aiohttp.ClientSession() as s:
