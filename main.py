@@ -10267,6 +10267,16 @@ async def sa_import_template(company_id: int, _=Depends(get_superadmin)):
     await db.import_template_from_company(company_id)
     return {"ok": True}
 
+@app.post("/api/saas/companies/{company_id}/import-departments")
+async def sa_import_depts_to_company(company_id: int, _=Depends(get_superadmin)):
+    await db.import_departments_from_template(company_id)
+    return {"ok": True}
+
+@app.post("/api/saas/companies/{company_id}/import-positions")
+async def sa_import_pos_to_company(company_id: int, _=Depends(get_superadmin)):
+    await db.import_positions_from_template(company_id)
+    return {"ok": True}
+
 
 @app.get("/api/company/resolve")
 async def company_resolve(slug: str):

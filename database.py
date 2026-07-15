@@ -3042,6 +3042,42 @@ async def seed_from_template(company_id: int):
         await seed_departments_positions(company_id)
 
 
+async def import_departments_from_template(company_id: int):
+    """Delete company's departments and copy from template (company_id=0)."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM positions WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM departments WHERE company_id=$1", company_id)
+    template_depts = await get_template_departments()
+    id_map = {}
+    for d in template_depts:
+        new_d = await create_department(company_id, d["name"], d.get("description"))
+        id_map[d["id"]] = new_d["id"]
+    return id_map
+
+async def import_positions_from_template(company_id: int):
+    """Delete company's positions and copy from template (company_id=0), remapping dept_id."""
+    if not pool: return
+    # Build current dept mapping by name
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM positions WHERE company_id=$1", company_id)
+    company_depts = await get_departments(company_id)
+    company_dept_map = {d["name"]: d["id"] for d in company_depts}
+    template_depts = await get_template_departments()
+    template_dept_map = {d["id"]: d["name"] for d in template_depts}
+    template_pos = await get_template_positions()
+    for p in template_pos:
+        dept_name = template_dept_map.get(p["dept_id"]) if p["dept_id"] else None
+        dept_id = company_dept_map.get(dept_name) if dept_name else None
+        await create_position(company_id, {
+            "dept_id":     dept_id,
+            "name":        p["name"],
+            "role":        p.get("role"),
+            "salary_type": p.get("salary_type"),
+            "salary_rate": p.get("salary_rate"),
+            "description": p.get("description"),
+        })
+
 async def migrate_company1_positions():
     """One-time: add 6 missing positions to company_id=1 (seeded before 18-pos update)."""
     if not pool: return
