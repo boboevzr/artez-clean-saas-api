@@ -1347,8 +1347,10 @@ async def create_tables():
             salary_type VARCHAR(20),
             salary_rate BIGINT,
             description VARCHAR(500),
+            sort_order  INTEGER NOT NULL DEFAULT 0,
             created_at  TIMESTAMPTZ DEFAULT NOW()
         );
+        ALTER TABLE positions ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
         """)
 
     logging.info("✅ API: Tables created/verified")
@@ -2878,7 +2880,7 @@ async def get_positions(company_id: int):
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM positions WHERE company_id=$1 ORDER BY dept_id NULLS LAST, id",
+            "SELECT * FROM positions WHERE company_id=$1 ORDER BY sort_order, id",
             company_id
         )
         return [dict(r) for r in rows]
@@ -2887,10 +2889,11 @@ async def create_position(company_id: int, data: dict):
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow(
-            """INSERT INTO positions (company_id, dept_id, name, role, salary_type, salary_rate, description)
-               VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
+            """INSERT INTO positions (company_id, dept_id, name, role, salary_type, salary_rate, description, sort_order)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
             company_id, data.get("dept_id"), data["name"],
-            data.get("role"), data.get("salary_type"), data.get("salary_rate"), data.get("description")
+            data.get("role"), data.get("salary_type"), data.get("salary_rate"),
+            data.get("description"), data.get("sort_order", 0)
         )
 
 async def update_position(pos_id: int, company_id: int, **fields):
@@ -2957,10 +2960,11 @@ async def seed_departments_positions(company_id: int):
         (dAdmin,     "IT-администратор",      "admin",      "fixed",   2200000, "Поддержка сайта, бота, оборудования"),
         (dAdmin,     "Агент",                 "agent",      "percent", 0,       "Привлечение клиентов"),
     ]
-    for dept_id, name, role, salary_type, salary_rate, desc in pos_list:
+    for i, (dept_id, name, role, salary_type, salary_rate, desc) in enumerate(pos_list):
         await create_position(company_id, {
             "dept_id": dept_id, "name": name, "role": role,
-            "salary_type": salary_type, "salary_rate": salary_rate, "description": desc
+            "salary_type": salary_type, "salary_rate": salary_rate,
+            "description": desc, "sort_order": i + 1
         })
 
 
@@ -3056,17 +3060,16 @@ async def import_departments_from_template(company_id: int):
     return id_map
 
 async def import_positions_from_template(company_id: int):
-    """Delete company's positions and copy from template (company_id=0), remapping dept_id."""
+    """Delete company's positions and copy from template (company_id=0), preserving sort_order."""
     if not pool: return
-    # Build current dept mapping by name
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM positions WHERE company_id=$1", company_id)
     company_depts = await get_departments(company_id)
     company_dept_map = {d["name"]: d["id"] for d in company_depts}
     template_depts = await get_template_departments()
     template_dept_map = {d["id"]: d["name"] for d in template_depts}
-    template_pos = await get_template_positions()
-    for p in template_pos:
+    template_pos = await get_template_positions()  # ordered by sort_order, id
+    for i, p in enumerate(template_pos):
         dept_name = template_dept_map.get(p["dept_id"]) if p["dept_id"] else None
         dept_id = company_dept_map.get(dept_name) if dept_name else None
         await create_position(company_id, {
@@ -3076,6 +3079,7 @@ async def import_positions_from_template(company_id: int):
             "salary_type": p.get("salary_type"),
             "salary_rate": p.get("salary_rate"),
             "description": p.get("description"),
+            "sort_order":  p.get("sort_order") or (i + 1),
         })
 
 async def migrate_company1_positions():
