@@ -129,6 +129,7 @@ async def startup():
     asyncio.create_task(_debt_reminder_worker())
     asyncio.create_task(_route_rollover_worker())
     await db.ensure_sms_dispatch_table()
+    await db.migrate_company1_positions()
     await db.ensure_sms_operator_prices()
     await db.ensure_saas_schema()
     asyncio.create_task(_sms_dispatch_worker())
@@ -10220,6 +10221,7 @@ async def saas_add_payment(company_id: int, body: dict = Body(...), _=Depends(ge
 # ── TEMPLATE DEPARTMENTS & POSITIONS ─────────────────────────────────────────
 @app.get("/api/saas/template/departments")
 async def sa_get_template_depts(_=Depends(get_superadmin)):
+    await db.seed_departments_positions(db.TEMPLATE_CID)
     rows = await db.get_template_departments()
     return {"departments": [dict(r) for r in rows]}
 

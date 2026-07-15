@@ -3042,6 +3042,39 @@ async def seed_from_template(company_id: int):
         await seed_departments_positions(company_id)
 
 
+async def migrate_company1_positions():
+    """One-time: add 6 missing positions to company_id=1 (seeded before 18-pos update)."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM positions WHERE company_id=1")
+        if count >= 18:
+            return
+        depts = await conn.fetch("SELECT id, name FROM departments WHERE company_id=1")
+        if not depts:
+            return
+        dept_map = {d["name"]: d["id"] for d in depts}
+        missing = [
+            (dept_map.get("Логистика"),    "Экспедитор",         "driver", "fixed",   1400000, "Сопровождение груза, оформление документов при передаче"),
+            (dept_map.get("Производство"), "Оператор сушки",     "washer", "fixed",   1500000, "Контроль сушильного оборудования, температурного режима"),
+            (dept_map.get("Производство"), "Контролёр качества", "washer", "fixed",   1700000, "Проверка качества до и после чистки, приёмка от мойщика"),
+            (dept_map.get("Администрация"),"Бухгалтер",          "admin",  "fixed",   2500000, "Финансовый учёт, зарплата, налоги"),
+            (dept_map.get("Администрация"),"HR-менеджер",        "admin",  "fixed",   2000000, "Кадры, табель, подбор персонала"),
+            (dept_map.get("Администрация"),"IT-администратор",   "admin",  "fixed",   2200000, "Поддержка сайта, бота, оборудования"),
+        ]
+        for dept_id, name, role, salary_type, salary_rate, desc in missing:
+            if not dept_id:
+                continue
+            exists = await conn.fetchval(
+                "SELECT id FROM positions WHERE company_id=1 AND name=$1", name
+            )
+            if not exists:
+                await conn.execute(
+                    """INSERT INTO positions (company_id, dept_id, name, role, salary_type, salary_rate, description)
+                       VALUES (1, $1, $2, $3, $4, $5, $6)""",
+                    dept_id, name, role, salary_type, salary_rate, desc
+                )
+
+
 # ══════════════════════════════════════
 #  ЛИДЫ
 # ══════════════════════════════════════
