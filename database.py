@@ -2964,6 +2964,84 @@ async def seed_departments_positions(company_id: int):
         })
 
 
+# ── ШАБЛОН ОТДЕЛОВ И ДОЛЖНОСТЕЙ (company_id=0) ──────────────────────────────
+TEMPLATE_CID = 0
+
+async def get_template_departments():
+    return await get_departments(TEMPLATE_CID)
+
+async def create_template_department(name: str, description: str = None):
+    return await create_department(TEMPLATE_CID, name, description)
+
+async def update_template_department(dept_id: int, **fields):
+    return await update_department(dept_id, TEMPLATE_CID, **fields)
+
+async def delete_template_department(dept_id: int):
+    await delete_department(dept_id, TEMPLATE_CID)
+
+async def get_template_positions():
+    return await get_positions(TEMPLATE_CID)
+
+async def create_template_position(data: dict):
+    return await create_position(TEMPLATE_CID, data)
+
+async def update_template_position(pos_id: int, **fields):
+    return await update_position(pos_id, TEMPLATE_CID, **fields)
+
+async def delete_template_position(pos_id: int):
+    await delete_position(pos_id, TEMPLATE_CID)
+
+async def import_template_from_company(company_id: int):
+    """Copy departments+positions from company_id into template (company_id=0). Clears existing template first."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM positions WHERE company_id=$1", TEMPLATE_CID)
+        await conn.execute("DELETE FROM departments WHERE company_id=$1", TEMPLATE_CID)
+    # Copy departments, build mapping old_id -> new_id
+    old_depts = await get_departments(company_id)
+    id_map = {}
+    for d in old_depts:
+        new_d = await create_template_department(d["name"], d.get("description"))
+        id_map[d["id"]] = new_d["id"]
+    # Copy positions with remapped dept_id
+    old_pos = await get_positions(company_id)
+    for p in old_pos:
+        await create_template_position({
+            "dept_id":     id_map.get(p["dept_id"]) if p["dept_id"] else None,
+            "name":        p["name"],
+            "role":        p.get("role"),
+            "salary_type": p.get("salary_type"),
+            "salary_rate": p.get("salary_rate"),
+            "description": p.get("description"),
+        })
+
+async def seed_from_template(company_id: int):
+    """Seed company from template (company_id=0). If template empty, use hardcoded defaults."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT id FROM departments WHERE company_id=$1 LIMIT 1", company_id)
+    if existing:
+        return
+    template_depts = await get_template_departments()
+    if template_depts:
+        id_map = {}
+        for d in template_depts:
+            new_d = await create_department(company_id, d["name"], d.get("description"))
+            id_map[d["id"]] = new_d["id"]
+        template_pos = await get_template_positions()
+        for p in template_pos:
+            await create_position(company_id, {
+                "dept_id":     id_map.get(p["dept_id"]) if p["dept_id"] else None,
+                "name":        p["name"],
+                "role":        p.get("role"),
+                "salary_type": p.get("salary_type"),
+                "salary_rate": p.get("salary_rate"),
+                "description": p.get("description"),
+            })
+    else:
+        await seed_departments_positions(company_id)
+
+
 # ══════════════════════════════════════
 #  ЛИДЫ
 # ══════════════════════════════════════

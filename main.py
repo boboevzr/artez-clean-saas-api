@@ -1835,7 +1835,7 @@ async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
 @app.get("/api/departments")
 async def get_departments_ep(me=Depends(get_current_staff)):
     cid = me.get("company_id") or 1
-    await db.seed_departments_positions(cid)
+    await db.seed_from_template(cid)
     rows = await db.get_departments(cid)
     return {"departments": [dict(r) for r in rows]}
 
@@ -1866,7 +1866,7 @@ async def delete_department_ep(dept_id: int, me=Depends(get_current_staff)):
 @app.get("/api/positions")
 async def get_positions_ep(me=Depends(get_current_staff)):
     cid = me.get("company_id") or 1
-    await db.seed_departments_positions(cid)
+    await db.seed_from_template(cid)
     rows = await db.get_positions(cid)
     return {"positions": [dict(r) for r in rows]}
 
@@ -9933,6 +9933,7 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
             credentials.append({"level": "branch", "role": role, "login": login, "password": pw, "branch": slug})
         except Exception:
             pass
+    await db.seed_from_template(company["id"])
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
@@ -10214,6 +10215,55 @@ async def saas_add_payment(company_id: int, body: dict = Body(...), _=Depends(ge
         raise HTTPException(400, "Укажите сумму")
     payment = await db.add_saas_payment(company_id, subscription_id, int(amount), payment_date or None, note)
     return {"ok": True, "payment": dict(payment)}
+
+
+# ── TEMPLATE DEPARTMENTS & POSITIONS ─────────────────────────────────────────
+@app.get("/api/saas/template/departments")
+async def sa_get_template_depts(_=Depends(get_superadmin)):
+    rows = await db.get_template_departments()
+    return {"departments": [dict(r) for r in rows]}
+
+@app.post("/api/saas/template/departments")
+async def sa_create_template_dept(body: dict, _=Depends(get_superadmin)):
+    row = await db.create_template_department(body["name"], body.get("description"))
+    return {"department": dict(row)}
+
+@app.patch("/api/saas/template/departments/{dept_id}")
+async def sa_update_template_dept(dept_id: int, body: dict, _=Depends(get_superadmin)):
+    row = await db.update_template_department(dept_id, **body)
+    if not row: raise HTTPException(404)
+    return {"department": dict(row)}
+
+@app.delete("/api/saas/template/departments/{dept_id}")
+async def sa_delete_template_dept(dept_id: int, _=Depends(get_superadmin)):
+    await db.delete_template_department(dept_id)
+    return {"ok": True}
+
+@app.get("/api/saas/template/positions")
+async def sa_get_template_pos(_=Depends(get_superadmin)):
+    rows = await db.get_template_positions()
+    return {"positions": [dict(r) for r in rows]}
+
+@app.post("/api/saas/template/positions")
+async def sa_create_template_pos(body: dict, _=Depends(get_superadmin)):
+    row = await db.create_template_position(body)
+    return {"position": dict(row)}
+
+@app.patch("/api/saas/template/positions/{pos_id}")
+async def sa_update_template_pos(pos_id: int, body: dict, _=Depends(get_superadmin)):
+    row = await db.update_template_position(pos_id, **body)
+    if not row: raise HTTPException(404)
+    return {"position": dict(row)}
+
+@app.delete("/api/saas/template/positions/{pos_id}")
+async def sa_delete_template_pos(pos_id: int, _=Depends(get_superadmin)):
+    await db.delete_template_position(pos_id)
+    return {"ok": True}
+
+@app.post("/api/saas/template/import/{company_id}")
+async def sa_import_template(company_id: int, _=Depends(get_superadmin)):
+    await db.import_template_from_company(company_id)
+    return {"ok": True}
 
 
 @app.get("/api/company/resolve")
