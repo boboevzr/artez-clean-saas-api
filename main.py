@@ -3554,11 +3554,16 @@ async def admin_login(req: AdminLoginRequest):
         if not company_id:
             raise HTTPException(status_code=401, detail="Компания не найдена")
     staff = await db.get_staff_by_login(req.login, company_id)
-    if not staff or staff["role"] != "admin":
+    _ADMIN_ROLES = ("admin", "manager", "callcenter")
+    if not staff or staff["role"] not in _ADMIN_ROLES:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     if not pwd_context.verify(req.password[:72], staff["password_hash"]):
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
-    return {"ok": True, "token": create_admin_token(company_id)}
+    if staff["role"] == "admin":
+        token = create_admin_token(company_id)
+    else:
+        token = create_staff_token(staff["id"], staff["login"], staff["role"], company_id)
+    return {"ok": True, "token": token}
 
 @app.post("/api/admin/change-master-password")
 async def change_master_password(body: dict, _=Depends(_get_admin)):
