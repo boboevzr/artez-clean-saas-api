@@ -1328,6 +1328,29 @@ async def create_tables():
         except Exception:
             pass
 
+    # ── Шаг 26б: отделы и должности ─────────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS departments (
+            id          SERIAL PRIMARY KEY,
+            company_id  INTEGER NOT NULL,
+            name        VARCHAR(100) NOT NULL,
+            description VARCHAR(500),
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS positions (
+            id          SERIAL PRIMARY KEY,
+            company_id  INTEGER NOT NULL,
+            dept_id     INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+            name        VARCHAR(100) NOT NULL,
+            role        VARCHAR(30),
+            salary_type VARCHAR(20),
+            salary_rate BIGINT,
+            description VARCHAR(500),
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        );
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -2814,6 +2837,120 @@ async def migrate_admin_logins():
     async with pool.acquire() as conn:
         res = await conn.execute("UPDATE staff SET login='admin' WHERE role='admin' AND login != 'admin'")
         return int(res.split()[-1])
+
+# ══════════════════════════════════════
+#  ОТДЕЛЫ И ДОЛЖНОСТИ
+# ══════════════════════════════════════
+async def get_departments(company_id: int):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM departments WHERE company_id=$1 ORDER BY id", company_id)
+        return [dict(r) for r in rows]
+
+async def create_department(company_id: int, name: str, description: str = None):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "INSERT INTO departments (company_id, name, description) VALUES ($1,$2,$3) RETURNING *",
+            company_id, name, description
+        )
+
+async def update_department(dept_id: int, company_id: int, **fields):
+    if not pool: return None
+    allowed = {"name", "description"}
+    sets, vals = [], [dept_id, company_id]
+    for k, v in fields.items():
+        if k in allowed:
+            vals.append(v); sets.append(f"{k}=${len(vals)}")
+    if not sets: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            f"UPDATE departments SET {', '.join(sets)} WHERE id=$1 AND company_id=$2 RETURNING *",
+            *vals
+        )
+
+async def delete_department(dept_id: int, company_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM departments WHERE id=$1 AND company_id=$2", dept_id, company_id)
+
+async def get_positions(company_id: int):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM positions WHERE company_id=$1 ORDER BY dept_id NULLS LAST, id",
+            company_id
+        )
+        return [dict(r) for r in rows]
+
+async def create_position(company_id: int, data: dict):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """INSERT INTO positions (company_id, dept_id, name, role, salary_type, salary_rate, description)
+               VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
+            company_id, data.get("dept_id"), data["name"],
+            data.get("role"), data.get("salary_type"), data.get("salary_rate"), data.get("description")
+        )
+
+async def update_position(pos_id: int, company_id: int, **fields):
+    if not pool: return None
+    allowed = {"dept_id", "name", "role", "salary_type", "salary_rate", "description"}
+    sets, vals = [], [pos_id, company_id]
+    for k, v in fields.items():
+        if k in allowed:
+            vals.append(v); sets.append(f"{k}=${len(vals)}")
+    if not sets: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            f"UPDATE positions SET {', '.join(sets)} WHERE id=$1 AND company_id=$2 RETURNING *",
+            *vals
+        )
+
+async def delete_position(pos_id: int, company_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM positions WHERE id=$1 AND company_id=$2", pos_id, company_id)
+
+async def seed_departments_positions(company_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT id FROM departments WHERE company_id=$1 LIMIT 1", company_id)
+    if existing:
+        return
+    depts = [
+        ("Работа с клиентами",  "Продажи, консультации, приём заказов"),
+        ("Логистика",           "Забор, доставка, маршруты"),
+        ("Производство",        "Чистка, сушка, упаковка, контроль качества"),
+        ("Склад",               "Учёт и хранение изделий"),
+        ("Технический отдел",   "Обслуживание оборудования"),
+        ("Администрация",       "Управление, бухгалтерия, кадры"),
+    ]
+    dept_ids = []
+    for name, desc in depts:
+        row = await create_department(company_id, name, desc)
+        dept_ids.append(row["id"])
+    dClient, dLogistic, dProd, dWarehouse, dTech, dAdmin = dept_ids
+    pos_list = [
+        (dClient,    "Менеджер по продажам", "manager",    "mixed",   2000000, "Консультирует клиентов, оформляет заказы"),
+        (dClient,    "Оператор колл-центра", "callcenter", "fixed",   1500000, "Обрабатывает входящие звонки и мессенджеры"),
+        (dClient,    "Приёмщик",             "receiver",   "fixed",   1400000, "Встречает клиентов, оформляет приём изделий"),
+        (dLogistic,  "Водитель-курьер",      "driver",     "percent", 0,       "Забор и доставка заказов клиентам"),
+        (dLogistic,  "Логист",               "logistics",  "fixed",   1600000, "Планирование маршрутов, координация доставки"),
+        (dProd,      "Мойщик",               "washer",     "percent", 0,       "Чистка и стирка изделий"),
+        (dProd,      "Упаковщик",            "packer",     "percent", 0,       "Упаковка готовых изделий"),
+        (dProd,      "Сортировщик",          "sorter",     "fixed",   1200000, "Сортировка изделий по категориям"),
+        (dWarehouse, "Кладовщик",            "storekeeper","fixed",   1300000, "Учёт и хранение изделий на складе"),
+        (dTech,      "Техник / Механик",     "technician", "fixed",   1800000, "Обслуживание оборудования"),
+        (dAdmin,     "Администратор",        "admin",      "fixed",   2500000, "Управление, полный доступ"),
+        (dAdmin,     "Агент",                "agent",      "percent", 0,       "Привлечение клиентов"),
+    ]
+    for dept_id, name, role, salary_type, salary_rate, desc in pos_list:
+        await create_position(company_id, {
+            "dept_id": dept_id, "name": name, "role": role,
+            "salary_type": salary_type, "salary_rate": salary_rate, "description": desc
+        })
+
 
 # ══════════════════════════════════════
 #  ЛИДЫ

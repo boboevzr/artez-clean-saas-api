@@ -1831,6 +1831,68 @@ async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
             raise HTTPException(status_code=500, detail=f"Ошибка БД: {str(e)}")
     return {"ok": True}
 
+# ── DEPARTMENTS ──────────────────────────────────────────────────────────────
+@app.get("/api/departments")
+async def get_departments_ep(me=Depends(get_current_staff)):
+    cid = me.get("company_id") or 1
+    await db.seed_departments_positions(cid)
+    rows = await db.get_departments(cid)
+    return {"departments": [dict(r) for r in rows]}
+
+@app.post("/api/departments")
+async def create_department_ep(body: dict, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    cid = me.get("company_id") or 1
+    row = await db.create_department(cid, body["name"], body.get("description"))
+    return {"department": dict(row)}
+
+@app.patch("/api/departments/{dept_id}")
+async def update_department_ep(dept_id: int, body: dict, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    row = await db.update_department(dept_id, me.get("company_id") or 1, **body)
+    if not row: raise HTTPException(404)
+    return {"department": dict(row)}
+
+@app.delete("/api/departments/{dept_id}")
+async def delete_department_ep(dept_id: int, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    await db.delete_department(dept_id, me.get("company_id") or 1)
+    return {"ok": True}
+
+# ── POSITIONS ────────────────────────────────────────────────────────────────
+@app.get("/api/positions")
+async def get_positions_ep(me=Depends(get_current_staff)):
+    cid = me.get("company_id") or 1
+    await db.seed_departments_positions(cid)
+    rows = await db.get_positions(cid)
+    return {"positions": [dict(r) for r in rows]}
+
+@app.post("/api/positions")
+async def create_position_ep(body: dict, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    row = await db.create_position(me.get("company_id") or 1, body)
+    return {"position": dict(row)}
+
+@app.patch("/api/positions/{pos_id}")
+async def update_position_ep(pos_id: int, body: dict, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    row = await db.update_position(pos_id, me.get("company_id") or 1, **body)
+    if not row: raise HTTPException(404)
+    return {"position": dict(row)}
+
+@app.delete("/api/positions/{pos_id}")
+async def delete_position_ep(pos_id: int, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    await db.delete_position(pos_id, me.get("company_id") or 1)
+    return {"ok": True}
+
+
 @app.put("/api/staff/{staff_id}/password")
 async def staff_change_password(staff_id: int, body: dict, me=Depends(get_current_staff)):
     if me["role"] != "admin" and me["id"] != staff_id:
