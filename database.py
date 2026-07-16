@@ -2924,47 +2924,48 @@ async def seed_departments_positions(company_id: int):
     if existing:
         return
     depts = [
-        ("Работа с клиентами",  "Продажи, консультации, приём заказов"),
-        ("Логистика",           "Забор, доставка, маршруты"),
-        ("Производство",        "Чистка, сушка, упаковка, контроль качества"),
-        ("Склад",               "Учёт и хранение изделий"),
-        ("Технический отдел",   "Обслуживание оборудования"),
-        ("Администрация",       "Управление, бухгалтерия, кадры"),
+        ("Работа с клиентами",  "Продажи, консультации, приём заказов",           "Mijozlar bilan ishlash"),
+        ("Логистика",           "Забор, доставка, маршруты",                       "Logistika"),
+        ("Производство",        "Чистка, сушка, упаковка, контроль качества",      "Ishlab chiqarish"),
+        ("Склад",               "Учёт и хранение изделий",                         "Ombor"),
+        ("Технический отдел",   "Обслуживание оборудования",                       "Texnik bo'lim"),
+        ("Администрация",       "Управление, бухгалтерия, кадры",                  "Ma'muriyat"),
     ]
     dept_ids = []
-    for name, desc in depts:
-        row = await create_department(company_id, name, desc)
+    for name, desc, name_uz in depts:
+        row = await create_department(company_id, name, desc, name_uz)
         dept_ids.append(row["id"])
     dClient, dLogistic, dProd, dWarehouse, dTech, dAdmin = dept_ids
     pos_list = [
+        # dept_id, name_ru, name_uz, role, salary_type, salary_rate, desc
         # Работа с клиентами
-        (dClient,    "Менеджер по продажам",  "manager",    "mixed",   2000000, "Консультирует клиентов, оформляет заказы, работает с входящими обращениями"),
-        (dClient,    "Оператор колл-центра",  "callcenter", "fixed",   1500000, "Обрабатывает входящие звонки, мессенджеры и Telegram-бот"),
-        (dClient,    "Приёмщик",              "receiver",   "fixed",   1500000, "Встречает клиентов в точке приёма, оформляет документы"),
+        (dClient,    "Менеджер по продажам",  "Savdo bo'yicha menejer",        "manager",    "mixed",   2000000, "Консультирует клиентов, оформляет заказы, работает с входящими обращениями"),
+        (dClient,    "Оператор колл-центра",  "Qo'ng'iroq markazi operatori",  "callcenter", "fixed",   1500000, "Обрабатывает входящие звонки, мессенджеры и Telegram-бот"),
+        (dClient,    "Приёмщик",              "Qabul qiluvchi",                "receiver",   "fixed",   1500000, "Встречает клиентов в точке приёма, оформляет документы"),
         # Логистика
-        (dLogistic,  "Водитель-курьер",       "driver",     "mixed",   1800000, "Забор и доставка изделий клиентам"),
-        (dLogistic,  "Оператор логистики",    "logistics",  "fixed",   1600000, "Планирует маршруты, контролирует забор и доставку"),
-        (dLogistic,  "Экспедитор",            "driver",     "fixed",   1400000, "Сопровождение груза, оформление документов при передаче"),
+        (dLogistic,  "Водитель-курьер",       "Haydovchi-kuryer",              "driver",     "mixed",   1800000, "Забор и доставка изделий клиентам"),
+        (dLogistic,  "Оператор логистики",    "Logistika operatori",           "logistics",  "fixed",   1600000, "Планирует маршруты, контролирует забор и доставку"),
+        (dLogistic,  "Экспедитор",            "Ekspeditor",                    "driver",     "fixed",   1400000, "Сопровождение груза, оформление документов при передаче"),
         # Производство
-        (dProd,      "Чистильщик / Мойщик",  "washer",     "mixed",   1800000, "Химчистка ковров, мягкой мебели, матрасов и штор"),
-        (dProd,      "Оператор сушки",        "washer",     "fixed",   1500000, "Контроль сушильного оборудования, температурного режима"),
-        (dProd,      "Оператор упаковки",     "packer",     "fixed",   1400000, "Упаковка готовых изделий, маркировка, подготовка к выдаче"),
-        (dProd,      "Контролёр качества",    "washer",     "fixed",   1700000, "Проверка качества до и после чистки, приёмка от мойщика"),
+        (dProd,      "Чистильщик / Мойщик",  "Tozalovchi / Yuvuvchi",        "washer",     "mixed",   1800000, "Химчистка ковров, мягкой мебели, матрасов и штор"),
+        (dProd,      "Оператор сушки",        "Quritish operatori",            "washer",     "fixed",   1500000, "Контроль сушильного оборудования, температурного режима"),
+        (dProd,      "Оператор упаковки",     "Qadoqlash operatori",           "packer",     "fixed",   1400000, "Упаковка готовых изделий, маркировка, подготовка к выдаче"),
+        (dProd,      "Контролёр качества",    "Sifat nazoratchisi",            "washer",     "fixed",   1700000, "Проверка качества до и после чистки, приёмка от мойщика"),
         # Склад
-        (dWarehouse, "Кладовщик",             "storekeeper","fixed",   1500000, "Учёт поступивших и выданных изделий, ведение складского журнала"),
-        (dWarehouse, "Сортировщик",           "sorter",     "fixed",   1300000, "Распределение изделий по типу, срочности и клиенту"),
+        (dWarehouse, "Кладовщик",             "Omborchi",                      "storekeeper","fixed",   1500000, "Учёт поступивших и выданных изделий, ведение складского журнала"),
+        (dWarehouse, "Сортировщик",           "Saralovchi",                    "sorter",     "fixed",   1300000, "Распределение изделий по типу, срочности и клиенту"),
         # Технический отдел
-        (dTech,      "Техник / Механик",      "technician", "fixed",   2000000, "Обслуживание и ремонт чистящего и сушильного оборудования"),
+        (dTech,      "Техник / Механик",      "Texnik / Mexanik",              "technician", "fixed",   2000000, "Обслуживание и ремонт чистящего и сушильного оборудования"),
         # Администрация
-        (dAdmin,     "Директор",              "admin",      "fixed",   5000000, "Общее руководство компанией"),
-        (dAdmin,     "Бухгалтер",             "admin",      "fixed",   2500000, "Финансовый учёт, зарплата, налоги"),
-        (dAdmin,     "HR-менеджер",           "admin",      "fixed",   2000000, "Кадры, табель, подбор персонала"),
-        (dAdmin,     "IT-администратор",      "admin",      "fixed",   2200000, "Поддержка сайта, бота, оборудования"),
-        (dAdmin,     "Агент",                 "agent",      "percent", 0,       "Привлечение клиентов"),
+        (dAdmin,     "Директор",              "Direktor",                      "admin",      "fixed",   5000000, "Общее руководство компанией"),
+        (dAdmin,     "Бухгалтер",             "Buxgalter",                     "admin",      "fixed",   2500000, "Финансовый учёт, зарплата, налоги"),
+        (dAdmin,     "HR-менеджер",           "HR-menejer",                    "admin",      "fixed",   2000000, "Кадры, табель, подбор персонала"),
+        (dAdmin,     "IT-администратор",      "IT-administrator",              "admin",      "fixed",   2200000, "Поддержка сайта, бота, оборудования"),
+        (dAdmin,     "Агент",                 "Agent",                         "agent",      "percent", 0,       "Привлечение клиентов"),
     ]
-    for i, (dept_id, name, role, salary_type, salary_rate, desc) in enumerate(pos_list):
+    for i, (dept_id, name, name_uz, role, salary_type, salary_rate, desc) in enumerate(pos_list):
         await create_position(company_id, {
-            "dept_id": dept_id, "name": name, "role": role,
+            "dept_id": dept_id, "name": name, "name_uz": name_uz, "role": role,
             "salary_type": salary_type, "salary_rate": salary_rate,
             "description": desc, "sort_order": i + 1
         })
@@ -3086,6 +3087,47 @@ async def import_positions_from_template(company_id: int):
             "description": p.get("description"),
             "sort_order":  p.get("sort_order") or (i + 1),
         })
+
+async def migrate_name_uz():
+    """Fill name_uz for existing departments and positions where it is still empty."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE departments SET name_uz = CASE name
+                WHEN 'Работа с клиентами' THEN 'Mijozlar bilan ishlash'
+                WHEN 'Логистика'          THEN 'Logistika'
+                WHEN 'Производство'       THEN 'Ishlab chiqarish'
+                WHEN 'Склад'              THEN 'Ombor'
+                WHEN 'Технический отдел'  THEN 'Texnik bo''lim'
+                WHEN 'Администрация'      THEN 'Ma''muriyat'
+                ELSE name_uz
+            END
+            WHERE name_uz = ''
+        """)
+        await conn.execute("""
+            UPDATE positions SET name_uz = CASE name
+                WHEN 'Менеджер по продажам'  THEN 'Savdo bo''yicha menejer'
+                WHEN 'Оператор колл-центра'  THEN 'Qo''ng''iroq markazi operatori'
+                WHEN 'Приёмщик'              THEN 'Qabul qiluvchi'
+                WHEN 'Водитель-курьер'        THEN 'Haydovchi-kuryer'
+                WHEN 'Оператор логистики'    THEN 'Logistika operatori'
+                WHEN 'Экспедитор'            THEN 'Ekspeditor'
+                WHEN 'Чистильщик / Мойщик'  THEN 'Tozalovchi / Yuvuvchi'
+                WHEN 'Оператор сушки'        THEN 'Quritish operatori'
+                WHEN 'Оператор упаковки'     THEN 'Qadoqlash operatori'
+                WHEN 'Контролёр качества'    THEN 'Sifat nazoratchisi'
+                WHEN 'Кладовщик'             THEN 'Omborchi'
+                WHEN 'Сортировщик'           THEN 'Saralovchi'
+                WHEN 'Техник / Механик'      THEN 'Texnik / Mexanik'
+                WHEN 'Директор'              THEN 'Direktor'
+                WHEN 'Бухгалтер'             THEN 'Buxgalter'
+                WHEN 'HR-менеджер'           THEN 'HR-menejer'
+                WHEN 'IT-администратор'      THEN 'IT-administrator'
+                WHEN 'Агент'                 THEN 'Agent'
+                ELSE name_uz
+            END
+            WHERE name_uz = ''
+        """)
 
 async def migrate_company1_positions():
     """One-time: add 6 missing positions to company_id=1 (seeded before 18-pos update)."""

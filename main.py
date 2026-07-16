@@ -130,6 +130,7 @@ async def startup():
     asyncio.create_task(_route_rollover_worker())
     await db.ensure_sms_dispatch_table()
     await db.migrate_company1_positions()
+    await db.migrate_name_uz()
     await db.ensure_sms_operator_prices()
     await db.ensure_saas_schema()
     asyncio.create_task(_sms_dispatch_worker())
