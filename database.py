@@ -2447,7 +2447,7 @@ async def save_staff_salary(staff_id: int, data: dict) -> None:
                     staff_id, k["metric"], float(k["target_value"]),
                     k.get("bonus_type", "fixed"), float(k.get("bonus_value") or 0))
 
-async def get_monthly_salary_calc(year: int, month: int) -> list:
+async def get_monthly_salary_calc(year: int, month: int, company_id: int = 1) -> list:
     """Расчёт зарплаты всех активных сотрудников за месяц."""
     if not pool: return []
     import calendar as _cal
@@ -2462,6 +2462,7 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                    COALESCE(s.active, TRUE) AS active
             FROM staff s
             WHERE s.role <> 'agent'
+              AND s.company_id = $3
               AND (
                 s.active = TRUE OR s.active IS NULL
                 OR EXISTS (
@@ -2470,7 +2471,7 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 )
               )
             ORDER BY s.branch NULLS LAST, s.last_name, s.first_name
-        """, start, end)
+        """, start, end, company_id)
 
         # Часы из табеля за период (все типы записей)
         ts_rows = await conn.fetch("""
