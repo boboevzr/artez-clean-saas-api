@@ -1438,6 +1438,18 @@ async def ensure_saas_schema():
                 pass
     logging.info("✅ API: prices multi-tenancy constraint (step 28) ready")
 
+    # ── Шаг 29: services per-company UNIQUE constraint ────────────────────
+    async with pool.acquire() as c:
+        for sql in [
+            "ALTER TABLE services DROP CONSTRAINT IF EXISTS services_key_key",
+            """DO $$ BEGIN ALTER TABLE services ADD CONSTRAINT services_co_key UNIQUE (company_id, key); EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
+        ]:
+            try:
+                await c.execute(sql)
+            except Exception:
+                pass
+    logging.info("✅ API: services per-company constraint (step 29) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -2160,31 +2172,76 @@ async def seed_company_prices(company_id: int, force: bool = False):
 async def get_services():
     if not pool:
         return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM services ORDER BY order_idx, key")
+        rows = await conn.fetch(
+            "SELECT * FROM services WHERE company_id=$1 ORDER BY order_idx, key", cid
+        )
         return [dict(r) for r in rows]
 
-async def upsert_service(key: str, name_ru: str, name_uz: str, emoji: str = '', order_idx: int = 0):
+async def get_catalog_services() -> list:
+    """Global service catalog (company_id=0) for superadmin."""
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM services WHERE company_id=0 ORDER BY order_idx, key"
+        )
+        return [dict(r) for r in rows]
+
+async def upsert_service(key: str, name_ru: str, name_uz: str, emoji: str = '', order_idx: int = 0, company_id: int = None):
     if not pool:
         return False
+    cid = company_id if company_id is not None else _cid()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO services (key, name_ru, name_uz, emoji, order_idx)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (key) DO UPDATE SET
+            INSERT INTO services (company_id, key, name_ru, name_uz, emoji, order_idx)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (company_id, key) DO UPDATE SET
                 name_ru   = EXCLUDED.name_ru,
                 name_uz   = EXCLUDED.name_uz,
                 emoji     = EXCLUDED.emoji,
                 order_idx = EXCLUDED.order_idx
-        """, key, name_ru, name_uz, emoji, order_idx)
+        """, cid, key, name_ru, name_uz, emoji, order_idx)
         return True
 
-async def delete_service(key: str):
+async def delete_service(key: str, company_id: int = None) -> bool:
     if not pool:
         return False
+    cid = company_id if company_id is not None else _cid()
     async with pool.acquire() as conn:
-        r = await conn.execute("DELETE FROM services WHERE key=$1", key)
+        r = await conn.execute("DELETE FROM services WHERE company_id=$1 AND key=$2", cid, key)
         return r == "DELETE 1"
+
+async def seed_company_services(company_id: int, force: bool = False):
+    """Seed company services from catalog template (company_id=0). Falls back to hardcoded defaults."""
+    if not pool:
+        return
+    async with pool.acquire() as conn:
+        if not force:
+            exists = await conn.fetchrow(
+                "SELECT id FROM services WHERE company_id=$1 LIMIT 1", company_id
+            )
+            if exists:
+                return
+        if force:
+            await conn.execute("DELETE FROM services WHERE company_id=$1", company_id)
+        template = await conn.fetch(
+            "SELECT key, name_ru, name_uz, emoji, order_idx FROM services WHERE company_id=0"
+        )
+    if template:
+        for r in template:
+            await upsert_service(r["key"], r["name_ru"], r["name_uz"], r["emoji"], r["order_idx"], company_id=company_id)
+    else:
+        defaults = [
+            ("carpet",      "Чистка ковра",         "Gilam tozalash",      "🧺", 1),
+            ("carpet_home", "Чистка ковра на дому",  "Uyda gilam tozalash", "🏠", 2),
+            ("sofa",        "Диван, кресло",          "Divan, kreslo",       "🛋", 3),
+            ("mattress",    "Матрас, одеяло",         "Matras, ko'rpa",      "🛏", 4),
+            ("curtains",    "Шторы",                  "Pardalar",            "🪟", 5),
+        ]
+        for key, ru, uz, em, idx in defaults:
+            await upsert_service(key, ru, uz, em, idx, company_id=company_id)
 
 # ══════════════════════════════════════
 #  ЕДИНИЦЫ ИЗМЕРЕНИЯ (общая таблица с ботом)
@@ -3121,6 +3178,7 @@ async def seed_from_template(company_id: int):
             })
     else:
         await seed_departments_positions(company_id)
+    await seed_company_services(company_id)
     await seed_company_prices(company_id)
 
 

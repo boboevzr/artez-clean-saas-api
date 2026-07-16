@@ -9939,6 +9939,7 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
         except Exception:
             pass
     await db.seed_from_template(company["id"])
+    await db.seed_company_services(company["id"])
     await db.seed_company_prices(company["id"])
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
@@ -10291,7 +10292,7 @@ async def sa_import_prices_to_company(company_id: int, _=Depends(get_superadmin)
 
 @app.get("/api/saas/catalog/services")
 async def sa_catalog_services(_=Depends(get_superadmin)):
-    svcs = await db.get_services()
+    svcs = await db.get_catalog_services()
     return {"ok": True, "services": svcs}
 
 @app.put("/api/saas/catalog/services")
@@ -10303,14 +10304,19 @@ async def sa_catalog_upsert_service(req: ServiceRequest, _=Depends(get_superadmi
     if not req.name_uz.strip():
         raise HTTPException(status_code=400, detail="Укажите название на UZ")
     await db.upsert_service(req.key.strip(), req.name_ru.strip(), req.name_uz.strip(),
-                            req.emoji.strip(), req.order_idx)
+                            req.emoji.strip(), req.order_idx, company_id=0)
     return {"ok": True}
 
 @app.delete("/api/saas/catalog/services/{key}")
 async def sa_catalog_delete_service(key: str, _=Depends(get_superadmin)):
-    ok = await db.delete_service(key)
+    ok = await db.delete_service(key, company_id=0)
     if not ok:
         raise HTTPException(status_code=404, detail="Услуга не найдена")
+    return {"ok": True}
+
+@app.post("/api/saas/companies/{company_id}/import-services")
+async def sa_import_services_to_company(company_id: int, _=Depends(get_superadmin)):
+    await db.seed_company_services(company_id, force=True)
     return {"ok": True}
 
 @app.get("/api/saas/catalog/prices")
