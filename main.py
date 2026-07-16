@@ -4054,22 +4054,12 @@ async def admin_get_services(_=Depends(get_admin)):
 
 @app.put("/api/admin/services")
 async def admin_upsert_service(req: ServiceRequest, _=Depends(get_admin)):
-    if not req.key.strip():
-        raise HTTPException(status_code=400, detail="Укажите ключ услуги")
-    if not req.name_ru.strip():
-        raise HTTPException(status_code=400, detail="Укажите название на RU")
-    if not req.name_uz.strip():
-        raise HTTPException(status_code=400, detail="Укажите название на UZ")
-    await db.upsert_service(req.key.strip(), req.name_ru.strip(), req.name_uz.strip(),
-                            req.emoji.strip(), req.order_idx)
-    return {"ok": True}
+    # Services are global (shared catalog) — only superadmin may modify them
+    raise HTTPException(status_code=403, detail="Справочник услуг управляется суперадмином")
 
 @app.delete("/api/admin/services/{key}")
 async def admin_delete_service(key: str, _=Depends(get_admin)):
-    ok = await db.delete_service(key)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Услуга не найдена")
-    return {"ok": True}
+    raise HTTPException(status_code=403, detail="Справочник услуг управляется суперадмином")
 
 @app.get("/api/units")
 async def get_units_public():
