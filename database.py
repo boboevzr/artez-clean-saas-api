@@ -1352,7 +1352,9 @@ async def create_tables():
         );
         ALTER TABLE positions ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE departments ADD COLUMN IF NOT EXISTS name_uz VARCHAR(100) NOT NULL DEFAULT '';
+        ALTER TABLE departments ADD COLUMN IF NOT EXISTS description_uz VARCHAR(500) NOT NULL DEFAULT '';
         ALTER TABLE positions ADD COLUMN IF NOT EXISTS name_uz VARCHAR(100) NOT NULL DEFAULT '';
+        ALTER TABLE positions ADD COLUMN IF NOT EXISTS description_uz VARCHAR(500) NOT NULL DEFAULT '';
         """)
 
     logging.info("✅ API: Tables created/verified")
@@ -2851,17 +2853,17 @@ async def get_departments(company_id: int):
         rows = await conn.fetch("SELECT * FROM departments WHERE company_id=$1 ORDER BY id", company_id)
         return [dict(r) for r in rows]
 
-async def create_department(company_id: int, name: str, description: str = None, name_uz: str = ''):
+async def create_department(company_id: int, name: str, description: str = None, name_uz: str = '', description_uz: str = ''):
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow(
-            "INSERT INTO departments (company_id, name, name_uz, description) VALUES ($1,$2,$3,$4) RETURNING *",
-            company_id, name, name_uz or '', description
+            "INSERT INTO departments (company_id, name, name_uz, description, description_uz) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+            company_id, name, name_uz or '', description, description_uz or ''
         )
 
 async def update_department(dept_id: int, company_id: int, **fields):
     if not pool: return None
-    allowed = {"name", "name_uz", "description"}
+    allowed = {"name", "name_uz", "description", "description_uz"}
     sets, vals = [], [dept_id, company_id]
     for k, v in fields.items():
         if k in allowed:
@@ -2891,16 +2893,16 @@ async def create_position(company_id: int, data: dict):
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow(
-            """INSERT INTO positions (company_id, dept_id, name, name_uz, role, salary_type, salary_rate, description, sort_order)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
+            """INSERT INTO positions (company_id, dept_id, name, name_uz, role, salary_type, salary_rate, description, description_uz, sort_order)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *""",
             company_id, data.get("dept_id"), data["name"], data.get("name_uz") or '',
             data.get("role"), data.get("salary_type"), data.get("salary_rate"),
-            data.get("description"), data.get("sort_order", 0)
+            data.get("description"), data.get("description_uz") or '', data.get("sort_order", 0)
         )
 
 async def update_position(pos_id: int, company_id: int, **fields):
     if not pool: return None
-    allowed = {"dept_id", "name", "name_uz", "role", "salary_type", "salary_rate", "description"}
+    allowed = {"dept_id", "name", "name_uz", "role", "salary_type", "salary_rate", "description", "description_uz"}
     sets, vals = [], [pos_id, company_id]
     for k, v in fields.items():
         if k in allowed:
@@ -2924,50 +2926,51 @@ async def seed_departments_positions(company_id: int):
     if existing:
         return
     depts = [
-        ("Работа с клиентами",  "Продажи, консультации, приём заказов",           "Mijozlar bilan ishlash"),
-        ("Логистика",           "Забор, доставка, маршруты",                       "Logistika"),
-        ("Производство",        "Чистка, сушка, упаковка, контроль качества",      "Ishlab chiqarish"),
-        ("Склад",               "Учёт и хранение изделий",                         "Ombor"),
-        ("Технический отдел",   "Обслуживание оборудования",                       "Texnik bo'lim"),
-        ("Администрация",       "Управление, бухгалтерия, кадры",                  "Ma'muriyat"),
+        # name, description, name_uz, description_uz
+        ("Работа с клиентами", "Продажи, консультации, приём заказов",          "Mijozlar bilan ishlash",  "Sotish, maslahat, buyurtmalarni qabul qilish"),
+        ("Логистика",          "Забор, доставка, маршруты",                      "Logistika",               "Olib kelish, yetkazib berish, marshrutlar"),
+        ("Производство",       "Чистка, сушка, упаковка, контроль качества",     "Ishlab chiqarish",        "Tozalash, quritish, qadoqlash, sifat nazorati"),
+        ("Склад",              "Учёт и хранение изделий",                        "Ombor",                   "Buyumlarni hisobga olish va saqlash"),
+        ("Технический отдел",  "Обслуживание оборудования",                      "Texnik bo'lim",           "Uskunalarga texnik xizmat ko'rsatish"),
+        ("Администрация",      "Управление, бухгалтерия, кадры",                 "Ma'muriyat",              "Boshqaruv, buxgalteriya, kadrlar"),
     ]
     dept_ids = []
-    for name, desc, name_uz in depts:
-        row = await create_department(company_id, name, desc, name_uz)
+    for name, desc, name_uz, desc_uz in depts:
+        row = await create_department(company_id, name, desc, name_uz, desc_uz)
         dept_ids.append(row["id"])
     dClient, dLogistic, dProd, dWarehouse, dTech, dAdmin = dept_ids
     pos_list = [
-        # dept_id, name_ru, name_uz, role, salary_type, salary_rate, desc
+        # dept_id, name, name_uz, role, salary_type, salary_rate, desc, desc_uz
         # Работа с клиентами
-        (dClient,    "Менеджер по продажам",  "Savdo bo'yicha menejer",        "manager",    "mixed",   2000000, "Консультирует клиентов, оформляет заказы, работает с входящими обращениями"),
-        (dClient,    "Оператор колл-центра",  "Qo'ng'iroq markazi operatori",  "callcenter", "fixed",   1500000, "Обрабатывает входящие звонки, мессенджеры и Telegram-бот"),
-        (dClient,    "Приёмщик",              "Qabul qiluvchi",                "receiver",   "fixed",   1500000, "Встречает клиентов в точке приёма, оформляет документы"),
+        (dClient,    "Менеджер по продажам",  "Savdo bo'yicha menejer",        "manager",    "mixed",   2000000, "Консультирует клиентов, оформляет заказы, работает с входящими обращениями",  "Mijozlarga maslahat beradi, buyurtmalarni rasmiylashtiradi, kiruvchi murojaatlar bilan ishlaydi"),
+        (dClient,    "Оператор колл-центра",  "Qo'ng'iroq markazi operatori",  "callcenter", "fixed",   1500000, "Обрабатывает входящие звонки, мессенджеры и Telegram-бот",                    "Kiruvchi qo'ng'iroqlar, messenjerlar va Telegram-botni qayta ishlaydi"),
+        (dClient,    "Приёмщик",              "Qabul qiluvchi",                "receiver",   "fixed",   1500000, "Встречает клиентов в точке приёма, оформляет документы",                      "Qabul punktida mijozlarni kutib oladi, hujjatlarni rasmiylashtiradi"),
         # Логистика
-        (dLogistic,  "Водитель-курьер",       "Haydovchi-kuryer",              "driver",     "mixed",   1800000, "Забор и доставка изделий клиентам"),
-        (dLogistic,  "Оператор логистики",    "Logistika operatori",           "logistics",  "fixed",   1600000, "Планирует маршруты, контролирует забор и доставку"),
-        (dLogistic,  "Экспедитор",            "Ekspeditor",                    "driver",     "fixed",   1400000, "Сопровождение груза, оформление документов при передаче"),
+        (dLogistic,  "Водитель-курьер",       "Haydovchi-kuryer",              "driver",     "mixed",   1800000, "Забор и доставка изделий клиентам",                                           "Buyumlarni mijozlardan olib keladi va yetkazib beradi"),
+        (dLogistic,  "Оператор логистики",    "Logistika operatori",           "logistics",  "fixed",   1600000, "Планирует маршруты, контролирует забор и доставку",                           "Marshrutlarni rejalashtiradi, olib kelish va yetkazib berishni nazorat qiladi"),
+        (dLogistic,  "Экспедитор",            "Ekspeditor",                    "driver",     "fixed",   1400000, "Сопровождение груза, оформление документов при передаче",                     "Yukni hamroh qiladi, topshirish vaqtida hujjatlarni rasmiylashtiradi"),
         # Производство
-        (dProd,      "Чистильщик / Мойщик",  "Tozalovchi / Yuvuvchi",        "washer",     "mixed",   1800000, "Химчистка ковров, мягкой мебели, матрасов и штор"),
-        (dProd,      "Оператор сушки",        "Quritish operatori",            "washer",     "fixed",   1500000, "Контроль сушильного оборудования, температурного режима"),
-        (dProd,      "Оператор упаковки",     "Qadoqlash operatori",           "packer",     "fixed",   1400000, "Упаковка готовых изделий, маркировка, подготовка к выдаче"),
-        (dProd,      "Контролёр качества",    "Sifat nazoratchisi",            "washer",     "fixed",   1700000, "Проверка качества до и после чистки, приёмка от мойщика"),
+        (dProd,      "Чистильщик / Мойщик",  "Tozalovchi / Yuvuvchi",        "washer",     "mixed",   1800000, "Химчистка ковров, мягкой мебели, матрасов и штор",                            "Gilam, yumshoq mebel, matras va pardalarni kimyoviy tozalaydi"),
+        (dProd,      "Оператор сушки",        "Quritish operatori",            "washer",     "fixed",   1500000, "Контроль сушильного оборудования, температурного режима",                     "Quritish uskunasi va harorat rejimini nazorat qiladi"),
+        (dProd,      "Оператор упаковки",     "Qadoqlash operatori",           "packer",     "fixed",   1400000, "Упаковка готовых изделий, маркировка, подготовка к выдаче",                   "Tayyor buyumlarni qadoqlaydi, belgilaydi, berish uchun tayyorlaydi"),
+        (dProd,      "Контролёр качества",    "Sifat nazoratchisi",            "washer",     "fixed",   1700000, "Проверка качества до и после чистки, приёмка от мойщика",                     "Tozalashdan oldin va keyin sifatni tekshiradi, yuvuvchidan qabul qiladi"),
         # Склад
-        (dWarehouse, "Кладовщик",             "Omborchi",                      "storekeeper","fixed",   1500000, "Учёт поступивших и выданных изделий, ведение складского журнала"),
-        (dWarehouse, "Сортировщик",           "Saralovchi",                    "sorter",     "fixed",   1300000, "Распределение изделий по типу, срочности и клиенту"),
+        (dWarehouse, "Кладовщик",             "Omborchi",                      "storekeeper","fixed",   1500000, "Учёт поступивших и выданных изделий, ведение складского журнала",             "Kelgan va berilgan buyumlarni hisobga oladi, ombor jurnalini yuritadi"),
+        (dWarehouse, "Сортировщик",           "Saralovchi",                    "sorter",     "fixed",   1300000, "Распределение изделий по типу, срочности и клиенту",                          "Buyumlarni tur, shoshilinchlik va mijoz bo'yicha ajratadi"),
         # Технический отдел
-        (dTech,      "Техник / Механик",      "Texnik / Mexanik",              "technician", "fixed",   2000000, "Обслуживание и ремонт чистящего и сушильного оборудования"),
+        (dTech,      "Техник / Механик",      "Texnik / Mexanik",              "technician", "fixed",   2000000, "Обслуживание и ремонт чистящего и сушильного оборудования",                   "Tozalash va quritish uskunalarini xizmat ko'rsatadi va ta'mirlaydi"),
         # Администрация
-        (dAdmin,     "Директор",              "Direktor",                      "admin",      "fixed",   5000000, "Общее руководство компанией"),
-        (dAdmin,     "Бухгалтер",             "Buxgalter",                     "admin",      "fixed",   2500000, "Финансовый учёт, зарплата, налоги"),
-        (dAdmin,     "HR-менеджер",           "HR-menejer",                    "admin",      "fixed",   2000000, "Кадры, табель, подбор персонала"),
-        (dAdmin,     "IT-администратор",      "IT-administrator",              "admin",      "fixed",   2200000, "Поддержка сайта, бота, оборудования"),
-        (dAdmin,     "Агент",                 "Agent",                         "agent",      "percent", 0,       "Привлечение клиентов"),
+        (dAdmin,     "Директор",              "Direktor",                      "admin",      "fixed",   5000000, "Общее руководство компанией",                                                 "Kompaniyani umumiy boshqarish"),
+        (dAdmin,     "Бухгалтер",             "Buxgalter",                     "admin",      "fixed",   2500000, "Финансовый учёт, зарплата, налоги",                                           "Moliyaviy hisobot, ish haqi, soliqlar"),
+        (dAdmin,     "HR-менеджер",           "HR-menejer",                    "admin",      "fixed",   2000000, "Кадры, табель, подбор персонала",                                             "Kadrlar, tabel, xodimlarni tanlash"),
+        (dAdmin,     "IT-администратор",      "IT-administrator",              "admin",      "fixed",   2200000, "Поддержка сайта, бота, оборудования",                                        "Sayt, bot va uskunalarni qo'llab-quvvatlash"),
+        (dAdmin,     "Агент",                 "Agent",                         "agent",      "percent", 0,       "Привлечение клиентов",                                                        "Mijozlarni jalb qilish"),
     ]
-    for i, (dept_id, name, name_uz, role, salary_type, salary_rate, desc) in enumerate(pos_list):
+    for i, (dept_id, name, name_uz, role, salary_type, salary_rate, desc, desc_uz) in enumerate(pos_list):
         await create_position(company_id, {
             "dept_id": dept_id, "name": name, "name_uz": name_uz, "role": role,
             "salary_type": salary_type, "salary_rate": salary_rate,
-            "description": desc, "sort_order": i + 1
+            "description": desc, "description_uz": desc_uz, "sort_order": i + 1
         })
 
 
@@ -2977,8 +2980,8 @@ TEMPLATE_CID = 0
 async def get_template_departments():
     return await get_departments(TEMPLATE_CID)
 
-async def create_template_department(name: str, description: str = None, name_uz: str = ''):
-    return await create_department(TEMPLATE_CID, name, description, name_uz)
+async def create_template_department(name: str, description: str = None, name_uz: str = '', description_uz: str = ''):
+    return await create_department(TEMPLATE_CID, name, description, name_uz, description_uz)
 
 async def update_template_department(dept_id: int, **fields):
     return await update_department(dept_id, TEMPLATE_CID, **fields)
@@ -3008,19 +3011,20 @@ async def import_template_from_company(company_id: int):
     old_depts = await get_departments(company_id)
     id_map = {}
     for d in old_depts:
-        new_d = await create_template_department(d["name"], d.get("description"), d.get("name_uz", ""))
+        new_d = await create_template_department(d["name"], d.get("description"), d.get("name_uz", ""), d.get("description_uz", ""))
         id_map[d["id"]] = new_d["id"]
     # Copy positions with remapped dept_id
     old_pos = await get_positions(company_id)
     for p in old_pos:
         await create_template_position({
-            "dept_id":     id_map.get(p["dept_id"]) if p["dept_id"] else None,
-            "name":        p["name"],
-            "name_uz":     p.get("name_uz", ""),
-            "role":        p.get("role"),
-            "salary_type": p.get("salary_type"),
-            "salary_rate": p.get("salary_rate"),
-            "description": p.get("description"),
+            "dept_id":        id_map.get(p["dept_id"]) if p["dept_id"] else None,
+            "name":           p["name"],
+            "name_uz":        p.get("name_uz", ""),
+            "role":           p.get("role"),
+            "salary_type":    p.get("salary_type"),
+            "salary_rate":    p.get("salary_rate"),
+            "description":    p.get("description"),
+            "description_uz": p.get("description_uz", ""),
         })
 
 async def seed_from_template(company_id: int):
@@ -3034,18 +3038,19 @@ async def seed_from_template(company_id: int):
     if template_depts:
         id_map = {}
         for d in template_depts:
-            new_d = await create_department(company_id, d["name"], d.get("description"), d.get("name_uz", ""))
+            new_d = await create_department(company_id, d["name"], d.get("description"), d.get("name_uz", ""), d.get("description_uz", ""))
             id_map[d["id"]] = new_d["id"]
         template_pos = await get_template_positions()
         for p in template_pos:
             await create_position(company_id, {
-                "dept_id":     id_map.get(p["dept_id"]) if p["dept_id"] else None,
-                "name":        p["name"],
-                "name_uz":     p.get("name_uz", ""),
-                "role":        p.get("role"),
-                "salary_type": p.get("salary_type"),
-                "salary_rate": p.get("salary_rate"),
-                "description": p.get("description"),
+                "dept_id":        id_map.get(p["dept_id"]) if p["dept_id"] else None,
+                "name":           p["name"],
+                "name_uz":        p.get("name_uz", ""),
+                "role":           p.get("role"),
+                "salary_type":    p.get("salary_type"),
+                "salary_rate":    p.get("salary_rate"),
+                "description":    p.get("description"),
+                "description_uz": p.get("description_uz", ""),
             })
     else:
         await seed_departments_positions(company_id)
@@ -3060,7 +3065,7 @@ async def import_departments_from_template(company_id: int):
     template_depts = await get_template_departments()
     id_map = {}
     for d in template_depts:
-        new_d = await create_department(company_id, d["name"], d.get("description"), d.get("name_uz", ""))
+        new_d = await create_department(company_id, d["name"], d.get("description"), d.get("name_uz", ""), d.get("description_uz", ""))
         id_map[d["id"]] = new_d["id"]
     return id_map
 
@@ -3078,55 +3083,84 @@ async def import_positions_from_template(company_id: int):
         dept_name = template_dept_map.get(p["dept_id"]) if p["dept_id"] else None
         dept_id = company_dept_map.get(dept_name) if dept_name else None
         await create_position(company_id, {
-            "dept_id":     dept_id,
-            "name":        p["name"],
-            "name_uz":     p.get("name_uz", ""),
-            "role":        p.get("role"),
-            "salary_type": p.get("salary_type"),
-            "salary_rate": p.get("salary_rate"),
-            "description": p.get("description"),
-            "sort_order":  p.get("sort_order") or (i + 1),
+            "dept_id":        dept_id,
+            "name":           p["name"],
+            "name_uz":        p.get("name_uz", ""),
+            "role":           p.get("role"),
+            "salary_type":    p.get("salary_type"),
+            "salary_rate":    p.get("salary_rate"),
+            "description":    p.get("description"),
+            "description_uz": p.get("description_uz", ""),
+            "sort_order":     p.get("sort_order") or (i + 1),
         })
 
 async def migrate_name_uz():
-    """Fill name_uz for existing departments and positions where it is still empty."""
+    """Fill name_uz / description_uz for existing departments and positions where still empty."""
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
-            UPDATE departments SET name_uz = CASE name
-                WHEN 'Работа с клиентами' THEN 'Mijozlar bilan ishlash'
-                WHEN 'Логистика'          THEN 'Logistika'
-                WHEN 'Производство'       THEN 'Ishlab chiqarish'
-                WHEN 'Склад'              THEN 'Ombor'
-                WHEN 'Технический отдел'  THEN 'Texnik bo''lim'
-                WHEN 'Администрация'      THEN 'Ma''muriyat'
-                ELSE name_uz
-            END
-            WHERE name_uz = ''
+            UPDATE departments SET
+                name_uz = CASE name
+                    WHEN 'Работа с клиентами' THEN 'Mijozlar bilan ishlash'
+                    WHEN 'Логистика'          THEN 'Logistika'
+                    WHEN 'Производство'       THEN 'Ishlab chiqarish'
+                    WHEN 'Склад'              THEN 'Ombor'
+                    WHEN 'Технический отдел'  THEN 'Texnik bo''lim'
+                    WHEN 'Администрация'      THEN 'Ma''muriyat'
+                    ELSE name_uz END,
+                description_uz = CASE name
+                    WHEN 'Работа с клиентами' THEN 'Sotish, maslahat, buyurtmalarni qabul qilish'
+                    WHEN 'Логистика'          THEN 'Olib kelish, yetkazib berish, marshrutlar'
+                    WHEN 'Производство'       THEN 'Tozalash, quritish, qadoqlash, sifat nazorati'
+                    WHEN 'Склад'              THEN 'Buyumlarni hisobga olish va saqlash'
+                    WHEN 'Технический отдел'  THEN 'Uskunalarga texnik xizmat ko''rsatish'
+                    WHEN 'Администрация'      THEN 'Boshqaruv, buxgalteriya, kadrlar'
+                    ELSE description_uz END
+            WHERE name_uz = '' OR description_uz = ''
         """)
         await conn.execute("""
-            UPDATE positions SET name_uz = CASE name
-                WHEN 'Менеджер по продажам'  THEN 'Savdo bo''yicha menejer'
-                WHEN 'Оператор колл-центра'  THEN 'Qo''ng''iroq markazi operatori'
-                WHEN 'Приёмщик'              THEN 'Qabul qiluvchi'
-                WHEN 'Водитель-курьер'        THEN 'Haydovchi-kuryer'
-                WHEN 'Оператор логистики'    THEN 'Logistika operatori'
-                WHEN 'Экспедитор'            THEN 'Ekspeditor'
-                WHEN 'Чистильщик / Мойщик'  THEN 'Tozalovchi / Yuvuvchi'
-                WHEN 'Оператор сушки'        THEN 'Quritish operatori'
-                WHEN 'Оператор упаковки'     THEN 'Qadoqlash operatori'
-                WHEN 'Контролёр качества'    THEN 'Sifat nazoratchisi'
-                WHEN 'Кладовщик'             THEN 'Omborchi'
-                WHEN 'Сортировщик'           THEN 'Saralovchi'
-                WHEN 'Техник / Механик'      THEN 'Texnik / Mexanik'
-                WHEN 'Директор'              THEN 'Direktor'
-                WHEN 'Бухгалтер'             THEN 'Buxgalter'
-                WHEN 'HR-менеджер'           THEN 'HR-menejer'
-                WHEN 'IT-администратор'      THEN 'IT-administrator'
-                WHEN 'Агент'                 THEN 'Agent'
-                ELSE name_uz
-            END
-            WHERE name_uz = ''
+            UPDATE positions SET
+                name_uz = CASE name
+                    WHEN 'Менеджер по продажам'  THEN 'Savdo bo''yicha menejer'
+                    WHEN 'Оператор колл-центра'  THEN 'Qo''ng''iroq markazi operatori'
+                    WHEN 'Приёмщик'              THEN 'Qabul qiluvchi'
+                    WHEN 'Водитель-курьер'        THEN 'Haydovchi-kuryer'
+                    WHEN 'Оператор логистики'    THEN 'Logistika operatori'
+                    WHEN 'Экспедитор'            THEN 'Ekspeditor'
+                    WHEN 'Чистильщик / Мойщик'  THEN 'Tozalovchi / Yuvuvchi'
+                    WHEN 'Оператор сушки'        THEN 'Quritish operatori'
+                    WHEN 'Оператор упаковки'     THEN 'Qadoqlash operatori'
+                    WHEN 'Контролёр качества'    THEN 'Sifat nazoratchisi'
+                    WHEN 'Кладовщик'             THEN 'Omborchi'
+                    WHEN 'Сортировщик'           THEN 'Saralovchi'
+                    WHEN 'Техник / Механик'      THEN 'Texnik / Mexanik'
+                    WHEN 'Директор'              THEN 'Direktor'
+                    WHEN 'Бухгалтер'             THEN 'Buxgalter'
+                    WHEN 'HR-менеджер'           THEN 'HR-menejer'
+                    WHEN 'IT-администратор'      THEN 'IT-administrator'
+                    WHEN 'Агент'                 THEN 'Agent'
+                    ELSE name_uz END,
+                description_uz = CASE name
+                    WHEN 'Менеджер по продажам'  THEN 'Mijozlarga maslahat beradi, buyurtmalarni rasmiylashtiradi, kiruvchi murojaatlar bilan ishlaydi'
+                    WHEN 'Оператор колл-центра'  THEN 'Kiruvchi qo''ng''iroqlar, messenjerlar va Telegram-botni qayta ishlaydi'
+                    WHEN 'Приёмщик'              THEN 'Qabul punktida mijozlarni kutib oladi, hujjatlarni rasmiylashtiradi'
+                    WHEN 'Водитель-курьер'        THEN 'Buyumlarni mijozlardan olib keladi va yetkazib beradi'
+                    WHEN 'Оператор логистики'    THEN 'Marshrutlarni rejalashtiradi, olib kelish va yetkazib berishni nazorat qiladi'
+                    WHEN 'Экспедитор'            THEN 'Yukni hamroh qiladi, topshirish vaqtida hujjatlarni rasmiylashtiradi'
+                    WHEN 'Чистильщик / Мойщик'  THEN 'Gilam, yumshoq mebel, matras va pardalarni kimyoviy tozalaydi'
+                    WHEN 'Оператор сушки'        THEN 'Quritish uskunasi va harorat rejimini nazorat qiladi'
+                    WHEN 'Оператор упаковки'     THEN 'Tayyor buyumlarni qadoqlaydi, belgilaydi, berish uchun tayyorlaydi'
+                    WHEN 'Контролёр качества'    THEN 'Tozalashdan oldin va keyin sifatni tekshiradi, yuvuvchidan qabul qiladi'
+                    WHEN 'Кладовщик'             THEN 'Kelgan va berilgan buyumlarni hisobga oladi, ombor jurnalini yuritadi'
+                    WHEN 'Сортировщик'           THEN 'Buyumlarni tur, shoshilinchlik va mijoz bo''yicha ajratadi'
+                    WHEN 'Техник / Механик'      THEN 'Tozalash va quritish uskunalarini xizmat ko''rsatadi va ta''mirlaydi'
+                    WHEN 'Директор'              THEN 'Kompaniyani umumiy boshqarish'
+                    WHEN 'Бухгалтер'             THEN 'Moliyaviy hisobot, ish haqi, soliqlar'
+                    WHEN 'HR-менеджер'           THEN 'Kadrlar, tabel, xodimlarni tanlash'
+                    WHEN 'IT-администратор'      THEN 'Sayt, bot va uskunalarni qo''llab-quvvatlash'
+                    WHEN 'Агент'                 THEN 'Mijozlarni jalb qilish'
+                    ELSE description_uz END
+            WHERE name_uz = '' OR description_uz = ''
         """)
 
 async def migrate_company1_positions():
