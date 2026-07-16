@@ -1424,6 +1424,20 @@ async def ensure_saas_schema():
             """)
     logging.info("✅ API: SaaS schema (step 27) ready")
 
+    # ── Шаг 28: цены per-company — исправить UNIQUE constraint ───────────
+    async with pool.acquire() as c:
+        for sql in [
+            "UPDATE prices SET company_id=0 WHERE company_id IS NULL",
+            "UPDATE services SET company_id=0 WHERE company_id IS NULL",
+            "ALTER TABLE prices DROP CONSTRAINT IF EXISTS prices_service_key_type_key_key",
+            """DO $$ BEGIN ALTER TABLE prices ADD CONSTRAINT prices_co_svc_tp UNIQUE (company_id, service_key, type_key); EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
+        ]:
+            try:
+                await c.execute(sql)
+            except Exception:
+                pass
+    logging.info("✅ API: prices multi-tenancy constraint (step 28) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -2071,20 +2085,73 @@ async def get_all_prices() -> dict:
 
 
 async def set_price(service_key: str, type_key: str, price: int,
-                     unit_key: str = None, min_order=None) -> bool:
+                     unit_key: str = None, min_order=None, company_id: int = None) -> bool:
     if not pool:
         return False
+    cid = company_id if company_id is not None else _cid()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO prices (service_key, type_key, price, unit_key, min_order, updated_at)
-            VALUES ($1, $2, $3, COALESCE($4, 'm2'), $5, NOW())
-            ON CONFLICT (service_key, type_key) DO UPDATE SET
+            INSERT INTO prices (company_id, service_key, type_key, price, unit_key, min_order, updated_at)
+            VALUES ($1, $2, $3, $4, COALESCE($5, 'm2'), $6, NOW())
+            ON CONFLICT (company_id, service_key, type_key) DO UPDATE SET
                 price      = EXCLUDED.price,
-                unit_key   = COALESCE($4, prices.unit_key),
-                min_order  = $5,
+                unit_key   = COALESCE($5, prices.unit_key),
+                min_order  = $6,
                 updated_at = NOW()
-        """, service_key, type_key, price, unit_key, min_order)
+        """, cid, service_key, type_key, price, unit_key, min_order)
     return True
+
+
+async def get_catalog_prices() -> dict:
+    """Template prices (company_id=0)."""
+    if not pool:
+        return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT service_key, type_key, price, unit_key, min_order FROM prices WHERE company_id=0 ORDER BY service_key, type_key"
+        )
+    result = {}
+    for r in rows:
+        result.setdefault(r["service_key"], {})[r["type_key"]] = {
+            "price": r["price"],
+            "unit_key": r["unit_key"],
+            "min_order": float(r["min_order"]) if r["min_order"] is not None else None,
+        }
+    return result
+
+
+async def seed_company_prices(company_id: int, force: bool = False):
+    """Seed company prices from template (company_id=0). If template empty, use hardcoded defaults."""
+    if not pool:
+        return
+    async with pool.acquire() as conn:
+        if not force:
+            exists = await conn.fetchrow("SELECT id FROM prices WHERE company_id=$1 LIMIT 1", company_id)
+            if exists:
+                return
+        if force:
+            await conn.execute("DELETE FROM prices WHERE company_id=$1", company_id)
+        template = await conn.fetch(
+            "SELECT service_key, type_key, price, unit_key, min_order FROM prices WHERE company_id=0"
+        )
+    if template:
+        for r in template:
+            await set_price(r["service_key"], r["type_key"], r["price"], r["unit_key"], r["min_order"], company_id=company_id)
+    else:
+        defaults = [
+            ("carpet",      "standard",  5000, "m2",    None),
+            ("carpet",      "express",   8000, "m2",    None),
+            ("carpet_home", "standard",  6000, "m2",    None),
+            ("carpet_home", "express",  10000, "m2",    None),
+            ("sofa",        "standard", 150000, "piece", None),
+            ("sofa",        "express",  200000, "piece", None),
+            ("mattress",    "standard", 100000, "piece", None),
+            ("mattress",    "express",  150000, "piece", None),
+            ("curtains",    "standard", 10000, "m2",    None),
+            ("curtains",    "express",  15000, "m2",    None),
+        ]
+        for skey, tkey, price, ukey, mord in defaults:
+            await set_price(skey, tkey, price, ukey, mord, company_id=company_id)
 
 
 # ══════════════════════════════════════
@@ -2093,9 +2160,8 @@ async def set_price(service_key: str, type_key: str, price: int,
 async def get_services():
     if not pool:
         return []
-    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM services WHERE company_id=$1 ORDER BY order_idx, key", cid)
+        rows = await conn.fetch("SELECT * FROM services ORDER BY order_idx, key")
         return [dict(r) for r in rows]
 
 async def upsert_service(key: str, name_ru: str, name_uz: str, emoji: str = '', order_idx: int = 0):
@@ -3055,6 +3121,7 @@ async def seed_from_template(company_id: int):
             })
     else:
         await seed_departments_positions(company_id)
+    await seed_company_prices(company_id)
 
 
 async def import_departments_from_template(company_id: int):

@@ -4030,12 +4030,10 @@ async def admin_get_prices(_=Depends(get_admin)):
 
 @app.put("/api/admin/prices")
 async def admin_set_price(req: SetPriceRequest, _=Depends(get_admin)):
-    SERVICE_KEYS = ["carpet","carpet_home","sofa","mattress","curtains"]
-    TYPE_KEYS    = ["standard","express"]
-    if req.service_key not in SERVICE_KEYS:
-        raise HTTPException(status_code=400, detail=f"Неверная услуга: {req.service_key}")
-    if req.type_key not in TYPE_KEYS:
-        raise HTTPException(status_code=400, detail=f"Неверный тип: {req.type_key}")
+    if not req.service_key.strip():
+        raise HTTPException(status_code=400, detail="Укажите ключ услуги")
+    if not req.type_key.strip():
+        raise HTTPException(status_code=400, detail="Укажите тип")
     if req.price <= 0:
         raise HTTPException(status_code=400, detail="Цена должна быть > 0")
     if req.min_order is not None and req.min_order <= 0:
@@ -9941,6 +9939,7 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
         except Exception:
             pass
     await db.seed_from_template(company["id"])
+    await db.seed_company_prices(company["id"])
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
@@ -10281,6 +10280,52 @@ async def sa_import_depts_to_company(company_id: int, _=Depends(get_superadmin))
 @app.post("/api/saas/companies/{company_id}/import-positions")
 async def sa_import_pos_to_company(company_id: int, _=Depends(get_superadmin)):
     await db.import_positions_from_template(company_id)
+    return {"ok": True}
+
+@app.post("/api/saas/companies/{company_id}/import-prices")
+async def sa_import_prices_to_company(company_id: int, _=Depends(get_superadmin)):
+    await db.seed_company_prices(company_id, force=True)
+    return {"ok": True}
+
+# ── Superadmin: catalog services & prices ────────────────────────────────
+
+@app.get("/api/saas/catalog/services")
+async def sa_catalog_services(_=Depends(get_superadmin)):
+    svcs = await db.get_services()
+    return {"ok": True, "services": svcs}
+
+@app.put("/api/saas/catalog/services")
+async def sa_catalog_upsert_service(req: ServiceRequest, _=Depends(get_superadmin)):
+    if not req.key.strip():
+        raise HTTPException(status_code=400, detail="Укажите ключ услуги")
+    if not req.name_ru.strip():
+        raise HTTPException(status_code=400, detail="Укажите название на RU")
+    if not req.name_uz.strip():
+        raise HTTPException(status_code=400, detail="Укажите название на UZ")
+    await db.upsert_service(req.key.strip(), req.name_ru.strip(), req.name_uz.strip(),
+                            req.emoji.strip(), req.order_idx)
+    return {"ok": True}
+
+@app.delete("/api/saas/catalog/services/{key}")
+async def sa_catalog_delete_service(key: str, _=Depends(get_superadmin)):
+    ok = await db.delete_service(key)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Услуга не найдена")
+    return {"ok": True}
+
+@app.get("/api/saas/catalog/prices")
+async def sa_catalog_prices(_=Depends(get_superadmin)):
+    prices = await db.get_catalog_prices()
+    return {"ok": True, "prices": prices}
+
+@app.put("/api/saas/catalog/prices")
+async def sa_catalog_set_price(req: SetPriceRequest, _=Depends(get_superadmin)):
+    if not req.service_key.strip() or not req.type_key.strip():
+        raise HTTPException(status_code=400, detail="Укажите ключи услуги и типа")
+    if req.price <= 0:
+        raise HTTPException(status_code=400, detail="Цена должна быть > 0")
+    await db.set_price(req.service_key, req.type_key, req.price,
+                       unit_key=req.unit_key, min_order=req.min_order, company_id=0)
     return {"ok": True}
 
 
