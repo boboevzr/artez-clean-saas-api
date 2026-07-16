@@ -1351,6 +1351,8 @@ async def create_tables():
             created_at  TIMESTAMPTZ DEFAULT NOW()
         );
         ALTER TABLE positions ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE departments ADD COLUMN IF NOT EXISTS name_uz VARCHAR(100) NOT NULL DEFAULT '';
+        ALTER TABLE positions ADD COLUMN IF NOT EXISTS name_uz VARCHAR(100) NOT NULL DEFAULT '';
         """)
 
     logging.info("✅ API: Tables created/verified")
@@ -2849,17 +2851,17 @@ async def get_departments(company_id: int):
         rows = await conn.fetch("SELECT * FROM departments WHERE company_id=$1 ORDER BY id", company_id)
         return [dict(r) for r in rows]
 
-async def create_department(company_id: int, name: str, description: str = None):
+async def create_department(company_id: int, name: str, description: str = None, name_uz: str = ''):
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow(
-            "INSERT INTO departments (company_id, name, description) VALUES ($1,$2,$3) RETURNING *",
-            company_id, name, description
+            "INSERT INTO departments (company_id, name, name_uz, description) VALUES ($1,$2,$3,$4) RETURNING *",
+            company_id, name, name_uz or '', description
         )
 
 async def update_department(dept_id: int, company_id: int, **fields):
     if not pool: return None
-    allowed = {"name", "description"}
+    allowed = {"name", "name_uz", "description"}
     sets, vals = [], [dept_id, company_id]
     for k, v in fields.items():
         if k in allowed:
@@ -2889,16 +2891,16 @@ async def create_position(company_id: int, data: dict):
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow(
-            """INSERT INTO positions (company_id, dept_id, name, role, salary_type, salary_rate, description, sort_order)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
-            company_id, data.get("dept_id"), data["name"],
+            """INSERT INTO positions (company_id, dept_id, name, name_uz, role, salary_type, salary_rate, description, sort_order)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
+            company_id, data.get("dept_id"), data["name"], data.get("name_uz") or '',
             data.get("role"), data.get("salary_type"), data.get("salary_rate"),
             data.get("description"), data.get("sort_order", 0)
         )
 
 async def update_position(pos_id: int, company_id: int, **fields):
     if not pool: return None
-    allowed = {"dept_id", "name", "role", "salary_type", "salary_rate", "description"}
+    allowed = {"dept_id", "name", "name_uz", "role", "salary_type", "salary_rate", "description"}
     sets, vals = [], [pos_id, company_id]
     for k, v in fields.items():
         if k in allowed:
@@ -2974,8 +2976,8 @@ TEMPLATE_CID = 0
 async def get_template_departments():
     return await get_departments(TEMPLATE_CID)
 
-async def create_template_department(name: str, description: str = None):
-    return await create_department(TEMPLATE_CID, name, description)
+async def create_template_department(name: str, description: str = None, name_uz: str = ''):
+    return await create_department(TEMPLATE_CID, name, description, name_uz)
 
 async def update_template_department(dept_id: int, **fields):
     return await update_department(dept_id, TEMPLATE_CID, **fields)
@@ -3005,7 +3007,7 @@ async def import_template_from_company(company_id: int):
     old_depts = await get_departments(company_id)
     id_map = {}
     for d in old_depts:
-        new_d = await create_template_department(d["name"], d.get("description"))
+        new_d = await create_template_department(d["name"], d.get("description"), d.get("name_uz", ""))
         id_map[d["id"]] = new_d["id"]
     # Copy positions with remapped dept_id
     old_pos = await get_positions(company_id)
@@ -3013,6 +3015,7 @@ async def import_template_from_company(company_id: int):
         await create_template_position({
             "dept_id":     id_map.get(p["dept_id"]) if p["dept_id"] else None,
             "name":        p["name"],
+            "name_uz":     p.get("name_uz", ""),
             "role":        p.get("role"),
             "salary_type": p.get("salary_type"),
             "salary_rate": p.get("salary_rate"),
@@ -3030,13 +3033,14 @@ async def seed_from_template(company_id: int):
     if template_depts:
         id_map = {}
         for d in template_depts:
-            new_d = await create_department(company_id, d["name"], d.get("description"))
+            new_d = await create_department(company_id, d["name"], d.get("description"), d.get("name_uz", ""))
             id_map[d["id"]] = new_d["id"]
         template_pos = await get_template_positions()
         for p in template_pos:
             await create_position(company_id, {
                 "dept_id":     id_map.get(p["dept_id"]) if p["dept_id"] else None,
                 "name":        p["name"],
+                "name_uz":     p.get("name_uz", ""),
                 "role":        p.get("role"),
                 "salary_type": p.get("salary_type"),
                 "salary_rate": p.get("salary_rate"),
@@ -3055,7 +3059,7 @@ async def import_departments_from_template(company_id: int):
     template_depts = await get_template_departments()
     id_map = {}
     for d in template_depts:
-        new_d = await create_department(company_id, d["name"], d.get("description"))
+        new_d = await create_department(company_id, d["name"], d.get("description"), d.get("name_uz", ""))
         id_map[d["id"]] = new_d["id"]
     return id_map
 
@@ -3075,6 +3079,7 @@ async def import_positions_from_template(company_id: int):
         await create_position(company_id, {
             "dept_id":     dept_id,
             "name":        p["name"],
+            "name_uz":     p.get("name_uz", ""),
             "role":        p.get("role"),
             "salary_type": p.get("salary_type"),
             "salary_rate": p.get("salary_rate"),

@@ -1845,7 +1845,7 @@ async def create_department_ep(body: dict, me=Depends(get_current_staff)):
     if me.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Нет доступа")
     cid = me.get("company_id") or 1
-    row = await db.create_department(cid, body["name"], body.get("description"))
+    row = await db.create_department(cid, body["name"], body.get("description"), body.get("name_uz", ""))
     return {"department": dict(row)}
 
 @app.patch("/api/departments/{dept_id}")
@@ -10232,7 +10232,7 @@ async def sa_get_template_depts(_=Depends(get_superadmin)):
 
 @app.post("/api/saas/template/departments")
 async def sa_create_template_dept(body: dict, _=Depends(get_superadmin)):
-    row = await db.create_template_department(body["name"], body.get("description"))
+    row = await db.create_template_department(body["name"], body.get("description"), body.get("name_uz", ""))
     return {"department": dict(row)}
 
 @app.patch("/api/saas/template/departments/{dept_id}")
