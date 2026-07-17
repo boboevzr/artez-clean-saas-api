@@ -1450,6 +1450,38 @@ async def ensure_saas_schema():
                 pass
     logging.info("✅ API: services per-company constraint (step 29) ready")
 
+    # ── Шаг 30: seed template (company_id=0) from company_id=1 if empty ──
+    async with pool.acquire() as c:
+        tpl_svcs = await c.fetchval("SELECT COUNT(*) FROM services WHERE company_id=0")
+        if tpl_svcs == 0:
+            rows = await c.fetch(
+                "SELECT key, name_ru, name_uz, emoji, order_idx FROM services WHERE company_id=1"
+            )
+            for r in rows:
+                try:
+                    await c.execute("""
+                        INSERT INTO services (company_id, key, name_ru, name_uz, emoji, order_idx)
+                        VALUES (0, $1, $2, $3, $4, $5)
+                        ON CONFLICT (company_id, key) DO NOTHING
+                    """, r["key"], r["name_ru"], r["name_uz"], r["emoji"], r["order_idx"])
+                except Exception:
+                    pass
+        tpl_prices = await c.fetchval("SELECT COUNT(*) FROM prices WHERE company_id=0")
+        if tpl_prices == 0:
+            rows = await c.fetch(
+                "SELECT service_key, type_key, price, unit_key, min_order FROM prices WHERE company_id=1"
+            )
+            for r in rows:
+                try:
+                    await c.execute("""
+                        INSERT INTO prices (company_id, service_key, type_key, price, unit_key, min_order, updated_at)
+                        VALUES (0, $1, $2, $3, $4, $5, NOW())
+                        ON CONFLICT (company_id, service_key, type_key) DO NOTHING
+                    """, r["service_key"], r["type_key"], r["price"], r["unit_key"], r["min_order"])
+                except Exception:
+                    pass
+    logging.info("✅ API: template seeded from company_id=1 (step 30) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
