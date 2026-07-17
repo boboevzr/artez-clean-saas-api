@@ -1467,28 +1467,34 @@ async def ensure_saas_schema():
             pass
     logging.info("✅ API: services per-company constraint (step 29) ready")
 
-    # ── Шаг 30: seed template (company_id=0) from company_id=1 if empty ──
+    # ── Шаг 30: sync template (company_id=0) from company_id=1 if keys differ ──
     async with pool.acquire() as c:
         try:
-            tpl_svcs = await c.fetchval("SELECT COUNT(*) FROM services WHERE company_id=0")
-            if tpl_svcs == 0:
+            tpl_keys  = {r["key"] for r in await c.fetch("SELECT key FROM services WHERE company_id=0")}
+            src_keys  = {r["key"] for r in await c.fetch("SELECT key FROM services WHERE company_id=1")}
+            if tpl_keys != src_keys:
+                await c.execute("DELETE FROM services WHERE company_id=0")
                 await c.execute("""
                     INSERT INTO services (company_id, key, name_ru, name_uz, emoji, order_idx)
                     SELECT 0, key, name_ru, name_uz, emoji, order_idx
                     FROM services WHERE company_id=1
                 """)
-        except Exception:
-            pass
+                logging.info("✅ API: template services resynced from company_id=1")
+        except Exception as e:
+            logging.warning(f"step 30 services seed error: {e}")
         try:
-            tpl_prices = await c.fetchval("SELECT COUNT(*) FROM prices WHERE company_id=0")
-            if tpl_prices == 0:
+            tpl_pkeys = {(r["service_key"], r["type_key"]) for r in await c.fetch("SELECT service_key, type_key FROM prices WHERE company_id=0")}
+            src_pkeys = {(r["service_key"], r["type_key"]) for r in await c.fetch("SELECT service_key, type_key FROM prices WHERE company_id=1")}
+            if tpl_pkeys != src_pkeys:
+                await c.execute("DELETE FROM prices WHERE company_id=0")
                 await c.execute("""
                     INSERT INTO prices (company_id, service_key, type_key, price, unit_key, min_order, updated_at)
                     SELECT 0, service_key, type_key, price, unit_key, min_order, NOW()
                     FROM prices WHERE company_id=1
                 """)
-        except Exception:
-            pass
+                logging.info("✅ API: template prices resynced from company_id=1")
+        except Exception as e:
+            logging.warning(f"step 30 prices seed error: {e}")
     logging.info("✅ API: template seeded from company_id=1 (step 30) ready")
 
 

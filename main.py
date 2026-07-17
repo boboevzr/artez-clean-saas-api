@@ -10319,6 +10319,26 @@ async def sa_import_services_to_company(company_id: int, _=Depends(get_superadmi
     await db.seed_company_services(company_id, force=True)
     return {"ok": True}
 
+@app.post("/api/saas/catalog/seed-from-company")
+async def sa_seed_catalog_from_company(_=Depends(get_superadmin)):
+    """Reseed company_id=0 template from company_id=1 (force)."""
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        await conn.execute("DELETE FROM services WHERE company_id=0")
+        await conn.execute("""
+            INSERT INTO services (company_id, key, name_ru, name_uz, emoji, order_idx)
+            SELECT 0, key, name_ru, name_uz, emoji, order_idx
+            FROM services WHERE company_id=1
+        """)
+        await conn.execute("DELETE FROM prices WHERE company_id=0")
+        await conn.execute("""
+            INSERT INTO prices (company_id, service_key, type_key, price, unit_key, min_order, updated_at)
+            SELECT 0, service_key, type_key, price, unit_key, min_order, NOW()
+            FROM prices WHERE company_id=1
+        """)
+    return {"ok": True, "message": "Template reseeded from company_id=1"}
+
 @app.get("/api/saas/catalog/prices")
 async def sa_catalog_prices(_=Depends(get_superadmin)):
     prices = await db.get_catalog_prices()
