@@ -1549,6 +1549,13 @@ async def ensure_saas_schema():
             logging.warning(f"step 31 tg template seed error: {e}")
     logging.info("✅ API: tg_status_messages multi-tenant PK (step 31) ready")
 
+    # ── Шаг 32: seed chat_templates + expense_categories into company_id=0 ──
+    try:
+        await seed_chat_templates_for_company0()
+        logging.info("✅ API: chat_templates template (company_id=0) seeded (step 32)")
+    except Exception as e:
+        logging.warning(f"step 32 chat template seed error: {e}")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -6841,6 +6848,156 @@ async def delete_expense_category(cat_id: int) -> dict:
             return {"ok": False, "error": "has_children"}
         await conn.execute("DELETE FROM expense_categories WHERE id=$1", cat_id)
         return {"ok": True}
+
+# ── Superadmin: expense_categories catalog (company_id=0) ─────────────
+async def get_expense_categories_for_company(company_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM expense_categories WHERE company_id=$1 ORDER BY sort_order, id", company_id)
+        return [dict(r) for r in rows]
+
+async def create_expense_category_for_company(company_id: int, name_ru: str, name_uz: str,
+        icon: str, parent_id, approve_level: str, receipt_required: bool,
+        amount_threshold, sort_order: int, for_staff: bool = False) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO expense_categories
+                (name_ru, name_uz, icon, parent_id, approve_level, receipt_required, amount_threshold, sort_order, for_staff, company_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *
+        """, name_ru, name_uz, icon, parent_id, approve_level,
+             receipt_required, amount_threshold, sort_order, for_staff, company_id)
+        return dict(row) if row else {}
+
+async def update_expense_category_for_company(company_id: int, cat_id: int,
+        name_ru: str, name_uz: str, icon: str, parent_id, approve_level: str,
+        receipt_required: bool, amount_threshold, sort_order: int,
+        active: bool, for_staff: bool = False) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE expense_categories
+            SET name_ru=$3, name_uz=$4, icon=$5, parent_id=$6,
+                approve_level=$7, receipt_required=$8, amount_threshold=$9,
+                sort_order=$10, active=$11, for_staff=$12
+            WHERE id=$1 AND company_id=$2 RETURNING *
+        """, cat_id, company_id, name_ru, name_uz, icon, parent_id, approve_level,
+             receipt_required, amount_threshold, sort_order, active, for_staff)
+        return dict(row) if row else {}
+
+async def delete_expense_category_for_company(company_id: int, cat_id: int) -> dict:
+    if not pool: return {"ok": False}
+    async with pool.acquire() as conn:
+        has_children = await conn.fetchval(
+            "SELECT COUNT(*) FROM expense_categories WHERE parent_id=$1 AND company_id=$2", cat_id, company_id)
+        if has_children:
+            return {"ok": False, "error": "has_children"}
+        await conn.execute("DELETE FROM expense_categories WHERE id=$1 AND company_id=$2", cat_id, company_id)
+        return {"ok": True}
+
+async def seed_company_expense_categories(company_id: int, force: bool = False):
+    if not pool: return
+    async with pool.acquire() as conn:
+        if not force:
+            existing = await conn.fetchval(
+                "SELECT COUNT(*) FROM expense_categories WHERE company_id=$1", company_id)
+            if existing > 0:
+                return
+        template = await conn.fetch(
+            "SELECT * FROM expense_categories WHERE company_id=0 ORDER BY sort_order, id")
+        if not template:
+            return
+        id_map: dict = {}
+        for r in template:
+            old_id = r['id']
+            new_parent = id_map.get(r['parent_id']) if r['parent_id'] else None
+            new_row = await conn.fetchrow("""
+                INSERT INTO expense_categories
+                    (name_ru, name_uz, icon, parent_id, approve_level, receipt_required,
+                     amount_threshold, sort_order, for_staff, active, company_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id
+            """, r['name_ru'], r['name_uz'], r['icon'], new_parent,
+                 r['approve_level'], r['receipt_required'], r['amount_threshold'],
+                 r['sort_order'], r['for_staff'], r['active'], company_id)
+            if new_row:
+                id_map[old_id] = new_row['id']
+
+# ── Superadmin: chat_templates catalog (company_id=0) ─────────────────
+async def get_chat_templates_for_company(company_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM chat_templates WHERE company_id=$1 ORDER BY lang, key, sort_order, id", company_id)
+        return [dict(r) for r in rows]
+
+async def upsert_chat_template_for_company(company_id: int, data: dict) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        tid = data.get('id')
+        if tid:
+            row = await conn.fetchrow(
+                "UPDATE chat_templates SET key=$3,lang=$4,text=$5,sort_order=$6,active=$7 WHERE id=$1 AND company_id=$2 RETURNING *",
+                tid, company_id, data['key'], data['lang'], data['text'],
+                data.get('sort_order', 0), data.get('active', True)
+            )
+        else:
+            row = await conn.fetchrow(
+                "INSERT INTO chat_templates (key,lang,text,sort_order,active,company_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
+                data['key'], data['lang'], data['text'], data.get('sort_order', 0),
+                data.get('active', True), company_id
+            )
+        return dict(row) if row else {}
+
+async def delete_chat_template_for_company(company_id: int, tid: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM chat_templates WHERE id=$1 AND company_id=$2", tid, company_id)
+
+async def seed_chat_templates_for_company0():
+    """Засеять шаблоны чата в company_id=0 (шаблон суперадмина)."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        for key, lang, text, sort_order in _CHAT_TEMPLATE_SEED:
+            existing = await conn.fetchrow(
+                "SELECT id FROM chat_templates WHERE key=$1 AND lang=$2 AND company_id=0", key, lang)
+            if key == 'quick':
+                existing_text = await conn.fetchval(
+                    "SELECT id FROM chat_templates WHERE key='quick' AND lang=$1 AND text=$2 AND company_id=0",
+                    lang, text)
+                if not existing_text:
+                    await conn.execute(
+                        "INSERT INTO chat_templates (key,lang,text,sort_order,company_id) VALUES ($1,$2,$3,$4,0)",
+                        key, lang, text, sort_order)
+            else:
+                if existing:
+                    await conn.execute(
+                        "UPDATE chat_templates SET text=$1, sort_order=$2 WHERE id=$3",
+                        text, sort_order, existing['id'])
+                else:
+                    await conn.execute(
+                        "INSERT INTO chat_templates (key,lang,text,sort_order,company_id) VALUES ($1,$2,$3,$4,0)",
+                        key, lang, text, sort_order)
+
+async def seed_company_chat_templates(company_id: int, force: bool = False):
+    if not pool: return
+    async with pool.acquire() as conn:
+        if not force:
+            existing = await conn.fetchval(
+                "SELECT COUNT(*) FROM chat_templates WHERE company_id=$1", company_id)
+            if existing > 0:
+                return
+        template = await conn.fetch(
+            "SELECT key, lang, text, sort_order, active FROM chat_templates WHERE company_id=0")
+        if not template:
+            source = _CHAT_TEMPLATE_SEED
+            await conn.executemany(
+                "INSERT INTO chat_templates (key,lang,text,sort_order,company_id) VALUES ($1,$2,$3,$4,$5)",
+                [(k, l, t, s, company_id) for k, l, t, s in source])
+        else:
+            await conn.executemany(
+                "INSERT INTO chat_templates (key,lang,text,sort_order,active,company_id) VALUES ($1,$2,$3,$4,$5,$6)",
+                [(r['key'], r['lang'], r['text'], r['sort_order'], r['active'], company_id) for r in template])
 
 async def create_expense(category_id: int, amount: float, description: str,
                          staff_id: int, branch: str, for_staff_id: int = None) -> dict:

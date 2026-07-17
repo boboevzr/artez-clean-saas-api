@@ -9942,6 +9942,8 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     await db.seed_company_services(company["id"])
     await db.seed_company_prices(company["id"])
     await db.seed_company_tg_messages(company["id"])
+    await db.seed_company_expense_categories(company["id"])
+    await db.seed_company_chat_templates(company["id"])
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
@@ -10373,6 +10375,95 @@ async def sa_catalog_delete_unit(key: str, _=Depends(get_superadmin)):
     ok = await db.delete_unit(key)
     if not ok:
         raise HTTPException(status_code=404, detail="Единица не найдена")
+    return {"ok": True}
+
+
+# ── Superadmin: expense categories catalog ────────────────────────────
+
+class ExpCatRequest(BaseModel):
+    name_ru: str
+    name_uz: str = ""
+    icon: str = "🧾"
+    parent_id: int | None = None
+    approve_level: str = "manager"
+    receipt_required: bool = False
+    amount_threshold: float | None = None
+    sort_order: int = 0
+    for_staff: bool = False
+    active: bool = True
+
+@app.get("/api/saas/catalog/expense-categories")
+async def sa_catalog_expense_cats(_=Depends(get_superadmin)):
+    cats = await db.get_expense_categories_for_company(0)
+    return {"ok": True, "categories": cats}
+
+@app.post("/api/saas/catalog/expense-categories")
+async def sa_catalog_create_expense_cat(req: ExpCatRequest, _=Depends(get_superadmin)):
+    row = await db.create_expense_category_for_company(
+        0, req.name_ru.strip(), req.name_uz.strip(), req.icon.strip(),
+        req.parent_id, req.approve_level, req.receipt_required,
+        req.amount_threshold, req.sort_order, req.for_staff)
+    return {"ok": True, "category": row}
+
+@app.put("/api/saas/catalog/expense-categories/{cat_id}")
+async def sa_catalog_update_expense_cat(cat_id: int, req: ExpCatRequest, _=Depends(get_superadmin)):
+    row = await db.update_expense_category_for_company(
+        0, cat_id, req.name_ru.strip(), req.name_uz.strip(), req.icon.strip(),
+        req.parent_id, req.approve_level, req.receipt_required,
+        req.amount_threshold, req.sort_order, req.active, req.for_staff)
+    if not row:
+        raise HTTPException(404, "Категория не найдена")
+    return {"ok": True, "category": row}
+
+@app.delete("/api/saas/catalog/expense-categories/{cat_id}")
+async def sa_catalog_delete_expense_cat(cat_id: int, _=Depends(get_superadmin)):
+    res = await db.delete_expense_category_for_company(0, cat_id)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error", "Ошибка удаления"))
+    return {"ok": True}
+
+@app.post("/api/saas/companies/{company_id}/import-expense-categories")
+async def sa_import_expense_cats(company_id: int, _=Depends(get_superadmin)):
+    if company_id <= 0:
+        raise HTTPException(400, "Нельзя применить к шаблону")
+    await db.seed_company_expense_categories(company_id, force=True)
+    return {"ok": True}
+
+# ── Superadmin: chat templates catalog ────────────────────────────────
+
+class ChatTplRequest(BaseModel):
+    id: int | None = None
+    key: str = "quick"
+    lang: str = "ru"
+    text: str
+    sort_order: int = 0
+    active: bool = True
+
+@app.get("/api/saas/catalog/chat-templates")
+async def sa_catalog_chat_tpls(_=Depends(get_superadmin)):
+    rows = await db.get_chat_templates_for_company(0)
+    return {"ok": True, "templates": rows}
+
+@app.post("/api/saas/catalog/chat-templates")
+async def sa_catalog_upsert_chat_tpl(req: ChatTplRequest, _=Depends(get_superadmin)):
+    row = await db.upsert_chat_template_for_company(0, req.model_dump())
+    return {"ok": True, "template": row}
+
+@app.delete("/api/saas/catalog/chat-templates/{tid}")
+async def sa_catalog_delete_chat_tpl(tid: int, _=Depends(get_superadmin)):
+    await db.delete_chat_template_for_company(0, tid)
+    return {"ok": True}
+
+@app.post("/api/saas/catalog/chat-templates/seed")
+async def sa_catalog_seed_chat_tpls(_=Depends(get_superadmin)):
+    await db.seed_chat_templates_for_company0()
+    return {"ok": True}
+
+@app.post("/api/saas/companies/{company_id}/import-chat-templates")
+async def sa_import_chat_tpls(company_id: int, _=Depends(get_superadmin)):
+    if company_id <= 0:
+        raise HTTPException(400, "Нельзя применить к шаблону")
+    await db.seed_company_chat_templates(company_id, force=True)
     return {"ok": True}
 
 
