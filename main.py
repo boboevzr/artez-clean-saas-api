@@ -10354,6 +10354,26 @@ async def sa_catalog_set_price(req: SetPriceRequest, _=Depends(get_superadmin)):
                        unit_key=req.unit_key, min_order=req.min_order, company_id=0)
     return {"ok": True}
 
+@app.get("/api/saas/catalog/units")
+async def sa_catalog_units(_=Depends(get_superadmin)):
+    units = await db.get_all_units()
+    return {"ok": True, "units": [dict(u) for u in units]}
+
+@app.put("/api/saas/catalog/units")
+async def sa_catalog_upsert_unit(req: UnitRequest, _=Depends(get_superadmin)):
+    if not req.key.strip():
+        raise HTTPException(status_code=400, detail="Укажите ключ")
+    await db.add_unit(req.key.strip(), req.name_ru.strip(), req.name_uz.strip(),
+                      req.symbol_ru.strip(), req.symbol_uz.strip())
+    return {"ok": True}
+
+@app.delete("/api/saas/catalog/units/{key}")
+async def sa_catalog_delete_unit(key: str, _=Depends(get_superadmin)):
+    ok = await db.delete_unit(key)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Единица не найдена")
+    return {"ok": True}
+
 
 @app.get("/api/company/resolve")
 async def company_resolve(slug: str):
