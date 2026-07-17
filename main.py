@@ -10526,6 +10526,74 @@ async def saas_delete_company(company_id: int, _=Depends(get_superadmin)):
     return {"ok": True}
 
 
+# ── Обслуживание БД ──────────────────────────────────────────────────────────
+
+_CLEANUP_TABLES = [
+    "chat_messages", "chat_sessions", "chat_templates",
+    "sms_contacts", "sms_dispatches", "sms_groups",
+    "autodial_group_members", "autodial_calls", "autodial_campaigns",
+    "autodial_groups", "autodial_callerids", "autodial_ivrs",
+    "route_orders", "routes",
+    "discount_requests", "debt_approval_requests", "order_receipt_log",
+    "order_activity", "order_payments", "order_photos",
+    "order_item_media", "order_items", "orders",
+    "lead_reminders", "lead_calls", "leads",
+    "salary_ledger", "staff_salary_percents", "staff_salary_per_unit",
+    "staff_salary_kpi", "staff_commissions",
+    "timesheet", "staff_attendance_events", "staff_personal", "staff",
+    "branches",
+    "prices", "services",
+    "positions", "departments",
+    "cash_handovers", "cash_shifts", "expense_categories", "expenses",
+    "crm_clients", "contacts", "site_contacts",
+    "promo_user_state", "promotions",
+    "push_subscriptions", "agent_notifications", "washer_notifications",
+    "tg_status_messages", "tg_phone_links",
+    "config", "settings", "users", "plans",
+]
+
+@app.get("/api/saas/maintenance/orphans")
+async def sa_orphans_preview(_=Depends(get_superadmin)):
+    """Подсчитать строки-сироты (company_id отсутствует в companies)."""
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    result = {}
+    async with db.pool.acquire() as conn:
+        for t in _CLEANUP_TABLES:
+            try:
+                n = await conn.fetchval(
+                    f"SELECT COUNT(*) FROM {t} "
+                    f"WHERE company_id IS NOT NULL "
+                    f"AND company_id NOT IN (SELECT id FROM companies)"
+                )
+                if n:
+                    result[t] = n
+            except Exception:
+                pass
+    return {"ok": True, "orphans": result, "total": sum(result.values())}
+
+@app.post("/api/saas/maintenance/cleanup")
+async def sa_cleanup_orphans(_=Depends(get_superadmin)):
+    """Удалить все строки-сироты."""
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    deleted = {}
+    async with db.pool.acquire() as conn:
+        for t in _CLEANUP_TABLES:
+            try:
+                r = await conn.execute(
+                    f"DELETE FROM {t} "
+                    f"WHERE company_id IS NOT NULL "
+                    f"AND company_id NOT IN (SELECT id FROM companies)"
+                )
+                n = int(r.split()[-1])
+                if n:
+                    deleted[t] = n
+            except Exception:
+                pass
+    return {"ok": True, "deleted": deleted, "total": sum(deleted.values())}
+
+
 # ── Настройки компании (timezone и прочее, управляется company admin) ────
 
 _SUPPORTED_TIMEZONES = [
