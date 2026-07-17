@@ -6980,32 +6980,82 @@ async def ensure_salary_ledger_table():
 async def delete_company_cascade(company_id: int):
     if not pool: return
     async with pool.acquire() as conn:
+        # Chat
+        await conn.execute("DELETE FROM chat_messages  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM chat_sessions  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM chat_templates WHERE company_id=$1", company_id)
+        # SMS
+        await conn.execute("DELETE FROM sms_contacts   WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM sms_dispatches WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM sms_groups     WHERE company_id=$1", company_id)
+        # Autodial
+        await conn.execute("DELETE FROM autodial_group_members WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM autodial_calls WHERE campaign_id IN (SELECT id FROM autodial_campaigns WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM autodial_campaigns  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM autodial_groups     WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM autodial_callerids  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM autodial_ivrs       WHERE company_id=$1", company_id)
+        # Routes
         await conn.execute("DELETE FROM route_orders WHERE route_id IN (SELECT id FROM routes WHERE company_id=$1)", company_id)
         await conn.execute("DELETE FROM routes WHERE company_id=$1", company_id)
+        # Orders (approvals, receipts, activity before orders)
+        await conn.execute("DELETE FROM discount_requests       WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM debt_approval_requests  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM order_receipt_log       WHERE company_id=$1", company_id)
         await conn.execute("DELETE FROM order_activity WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
         await conn.execute("DELETE FROM order_payments WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
-        await conn.execute("DELETE FROM order_photos WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM order_photos   WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
         await conn.execute("DELETE FROM order_item_media WHERE item_id IN (SELECT id FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1))", company_id)
         await conn.execute("DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)", company_id)
         await conn.execute("DELETE FROM orders WHERE company_id=$1", company_id)
+        # Leads
         await conn.execute("DELETE FROM lead_reminders WHERE lead_id IN (SELECT id FROM leads WHERE company_id=$1)", company_id)
-        await conn.execute("DELETE FROM lead_calls WHERE lead_id IN (SELECT id FROM leads WHERE company_id=$1)", company_id)
+        await conn.execute("DELETE FROM lead_calls     WHERE lead_id IN (SELECT id FROM leads WHERE company_id=$1)", company_id)
         await conn.execute("DELETE FROM leads WHERE company_id=$1", company_id)
+        # Staff (salary tables before staff)
+        await conn.execute("DELETE FROM salary_ledger          WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM staff_salary_percents  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM staff_salary_per_unit  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM staff_salary_kpi       WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM staff_commissions      WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM timesheet              WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM staff_attendance_events WHERE company_id=$1", company_id)
         await conn.execute("DELETE FROM staff_personal WHERE staff_id IN (SELECT id FROM staff WHERE company_id=$1)", company_id)
         await conn.execute("DELETE FROM staff WHERE company_id=$1", company_id)
+        # Branches
         await conn.execute("DELETE FROM branches WHERE company_id=$1", company_id)
-        await conn.execute("DELETE FROM config WHERE company_id=$1", company_id)
-        await conn.execute("DELETE FROM settings WHERE company_id=$1", company_id)
-        await conn.execute("DELETE FROM crm_clients WHERE company_id=$1", company_id)
-        await conn.execute("DELETE FROM contacts WHERE company_id=$1", company_id)
+        # Prices & Catalog
+        await conn.execute("DELETE FROM prices   WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM services WHERE company_id=$1", company_id)
+        # Positions & Departments (no FK to companies, но очищаем мусор)
+        await conn.execute("DELETE FROM positions   WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM departments WHERE company_id=$1", company_id)
+        # Cash & Expenses
         await conn.execute("DELETE FROM cash_handovers WHERE shift_id IN (SELECT id FROM cash_shifts WHERE company_id=$1)", company_id)
-        await conn.execute("DELETE FROM cash_shifts WHERE company_id=$1", company_id)
-        await conn.execute("DELETE FROM autodial_calls WHERE campaign_id IN (SELECT id FROM autodial_campaigns WHERE company_id=$1)", company_id)
-        await conn.execute("DELETE FROM autodial_campaigns WHERE company_id=$1", company_id)
-        await conn.execute("DELETE FROM autodial_groups WHERE company_id=$1", company_id)
-        await conn.execute("DELETE FROM push_subscriptions WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM cash_shifts        WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM expense_categories WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM expenses           WHERE company_id=$1", company_id)
+        # CRM
+        await conn.execute("DELETE FROM crm_clients  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM contacts     WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM site_contacts WHERE company_id=$1", company_id)
+        # Promos
+        await conn.execute("DELETE FROM promo_user_state WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM promotions       WHERE company_id=$1", company_id)
+        # Notifications & TG
+        await conn.execute("DELETE FROM push_subscriptions  WHERE company_id=$1", company_id)
         await conn.execute("DELETE FROM agent_notifications WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM washer_notifications WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM tg_status_messages  WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM tg_phone_links      WHERE company_id=$1", company_id)
+        # Config & Settings
+        await conn.execute("DELETE FROM config   WHERE company_id=$1", company_id)
+        await conn.execute("DELETE FROM settings WHERE company_id=$1", company_id)
+        # Users
+        await conn.execute("DELETE FROM users WHERE company_id=$1", company_id)
+        # Plans
         await conn.execute("DELETE FROM plans WHERE company_id=$1", company_id)
+        # Finally delete company (saas_subscriptions/payments cascade automatically)
         await conn.execute("DELETE FROM companies WHERE id=$1", company_id)
 
 
@@ -7790,7 +7840,7 @@ async def get_all_companies():
         return await conn.fetch(
             "SELECT id, name, slug, plan, max_branches, max_staff, active, created_at, "
             "contact_name, contact_phone, contact_email, inn, legal_name, address, notes "
-            "FROM companies ORDER BY id"
+            "FROM companies WHERE id > 0 ORDER BY id"
         )
 
 async def get_company(company_id: int):

@@ -10517,6 +10517,8 @@ async def saas_delete_branch(company_id: int, branch_id: int, _=Depends(get_supe
 
 @app.delete("/api/saas/companies/{company_id}")
 async def saas_delete_company(company_id: int, _=Depends(get_superadmin)):
+    if company_id <= 1:
+        raise HTTPException(status_code=400, detail="Эту компанию удалить нельзя")
     company = await db.get_company(company_id)
     if not company:
         raise HTTPException(status_code=404, detail="Компания не найдена")
