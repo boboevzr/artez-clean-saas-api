@@ -67,6 +67,31 @@ DB_URL = os.getenv("DATABASE_URL", "")
 
 pool = None
 
+_TG_STATUS_DEFAULTS = [
+    ("new",       True,  "🆕 Ваша заявка #{order_num} принята!\n\nУслуга: {service}\nДата вывоза: {pickup_date}\n\nМы свяжемся с вами для подтверждения.",
+                         "🆕 #{order_num} raqamli arizangiz qabul qilindi!\n\nXizmat: {service}\nOlib ketish sanasi: {pickup_date}\n\nTasdiqlash uchun siz bilan bog'lanamiz."),
+    ("confirmed", True,  "✅ Ваш заказ #{order_num} подтверждён!\n\nВодитель приедет: {pickup_date}\n📞 По вопросам: 1221",
+                         "✅ #{order_num} raqamli buyurtmangiz tasdiqlandi!\n\nHaydovchi keladi: {pickup_date}\n📞 Savollar uchun: 1221"),
+    ("pickup",    False, "🚗 Водитель выехал за вашим ковром #{order_num}.\n\nАдрес: {address}",
+                         "🚗 Haydovchi #{order_num} gilamingiz uchun yo'lga chiqdi.\n\nManzil: {address}"),
+    ("received",  True,  "📥 Ваш ковёр #{order_num} доставлен в мастерскую.\n\nНачинаем обработку. Сообщим о готовности!",
+                         "📥 #{order_num} gilamingiz ustaxonaga yetkazildi.\n\nIshlashni boshladik. Tayyor bo'lganda xabar beramiz!"),
+    ("washing",   False, "🧼 Ваш ковёр #{order_num} на мойке.",
+                         "🧼 #{order_num} gilamingiz yuvish jarayonida."),
+    ("drying",    False, "💨 Ваш ковёр #{order_num} на сушке.",
+                         "💨 #{order_num} gilamingiz quritilmoqda."),
+    ("packing",   False, "📦 Ваш ковёр #{order_num} упаковывается.",
+                         "📦 #{order_num} gilamingiz qadoqlanmoqda."),
+    ("ready",     True,  "✅ Ваш ковёр #{order_num} готов!\n\nМожем доставить или вы можете забрать сами.\n📞 Позвоните: 1221",
+                         "✅ #{order_num} gilamingiz tayyor!\n\nYetkazib berishimiz yoki o'zingiz olib ketishingiz mumkin.\n📞 Qo'ng'iroq qiling: 1221"),
+    ("delivery",  True,  "🚚 Ваш ковёр #{order_num} в пути!\n\nВодитель скоро будет у вас. Ждите звонка.",
+                         "🚚 #{order_num} gilamingiz yo'lda!\n\nHaydovchi tez orada sizga etib keladi. Qo'ng'iroqni kuting."),
+    ("delivered", True,  "🎉 Ваш ковёр #{order_num} доставлен!\n\nСпасибо что выбрали ARTEZ. Будем рады видеть вас снова! ⭐",
+                         "🎉 #{order_num} gilamingiz yetkazildi!\n\nARTEZ ni tanlaganingiz uchun rahmat. Yana ko'rishishni xohlaymiz! ⭐"),
+    ("cancelled", True,  "❌ Ваш заказ #{order_num} отменён.\n\nЕсли это ошибка — позвоните нам: 1221",
+                         "❌ #{order_num} raqamli buyurtmangiz bekor qilindi.\n\nXato bo'lsa — qo'ng'iroq qiling: 1221"),
+]
+
 async def init_db():
     global pool
     if not DB_URL:
@@ -882,34 +907,10 @@ async def create_tables():
         );
         """)
         # Дефолтные шаблоны если таблица пустая
-        defaults = [
-            ("new",       True,  "🆕 Ваша заявка #{order_num} принята!\n\nУслуга: {service}\nДата вывоза: {pickup_date}\n\nМы свяжемся с вами для подтверждения.",
-                                 "🆕 #{order_num} raqamli arizangiz qabul qilindi!\n\nXizmat: {service}\nOlib ketish sanasi: {pickup_date}\n\nTasdiqlash uchun siz bilan bog'lanamiz."),
-            ("confirmed", True,  "✅ Ваш заказ #{order_num} подтверждён!\n\nВодитель приедет: {pickup_date}\n📞 По вопросам: 1221",
-                                 "✅ #{order_num} raqamli buyurtmangiz tasdiqlandi!\n\nHaydovchi keladi: {pickup_date}\n📞 Savollar uchun: 1221"),
-            ("pickup",    False, "🚗 Водитель выехал за вашим ковром #{order_num}.\n\nАдрес: {address}",
-                                 "🚗 Haydovchi #{order_num} gilamingiz uchun yo'lga chiqdi.\n\nManzil: {address}"),
-            ("received",  True,  "📥 Ваш ковёр #{order_num} доставлен в мастерскую.\n\nНачинаем обработку. Сообщим о готовности!",
-                                 "📥 #{order_num} gilamingiz ustaxonaga yetkazildi.\n\nIshlashni boshladik. Tayyor bo'lganda xabar beramiz!"),
-            ("washing",   False, "🧼 Ваш ковёр #{order_num} на мойке.",
-                                 "🧼 #{order_num} gilamingiz yuvish jarayonida."),
-            ("drying",    False, "💨 Ваш ковёр #{order_num} на сушке.",
-                                 "💨 #{order_num} gilamingiz quritilmoqda."),
-            ("packing",   False, "📦 Ваш ковёр #{order_num} упаковывается.",
-                                 "📦 #{order_num} gilamingiz qadoqlanmoqda."),
-            ("ready",     True,  "✅ Ваш ковёр #{order_num} готов!\n\nМожем доставить или вы можете забрать сами.\n📞 Позвоните: 1221",
-                                 "✅ #{order_num} gilamingiz tayyor!\n\nYetkazib berishimiz yoki o'zingiz olib ketishingiz mumkin.\n📞 Qo'ng'iroq qiling: 1221"),
-            ("delivery",  True,  "🚚 Ваш ковёр #{order_num} в пути!\n\nВодитель скоро будет у вас. Ждите звонка.",
-                                 "🚚 #{order_num} gilamingiz yo'lda!\n\nHaydovchi tez orada sizga etib keladi. Qo'ng'iroqni kuting."),
-            ("delivered", True,  "🎉 Ваш ковёр #{order_num} доставлен!\n\nСпасибо что выбрали ARTEZ. Будем рады видеть вас снова! ⭐",
-                                 "🎉 #{order_num} gilamingiz yetkazildi!\n\nARTEZ ni tanlaganingiz uchun rahmat. Yana ko'rishishni xohlaymiz! ⭐"),
-            ("cancelled", True,  "❌ Ваш заказ #{order_num} отменён.\n\nЕсли это ошибка — позвоните нам: 1221",
-                                 "❌ #{order_num} raqamli buyurtmangiz bekor qilindi.\n\nXato bo'lsa — qo'ng'iroq qiling: 1221"),
-        ]
         await c.executemany("""
             INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz)
-            VALUES ($1, $2, $3, $4) ON CONFLICT (status) DO NOTHING
-        """, defaults)
+            VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING
+        """, _TG_STATUS_DEFAULTS)
 
     # ── Шаг 5: фото/видео заказов ────────────────────────────────────────
     async with pool.acquire() as c:
@@ -1519,6 +1520,34 @@ async def ensure_saas_schema():
         except Exception as e:
             logging.warning(f"step 30 prices seed error: {e}")
     logging.info("✅ API: template seeded from company_id=1 (step 30) ready")
+
+    # ── Шаг 31: fix tg_status_messages PK for multi-tenant ──────────────────
+    async with pool.acquire() as c:
+        try:
+            await c.execute("ALTER TABLE tg_status_messages ADD COLUMN IF NOT EXISTS id BIGSERIAL")
+            await c.execute("ALTER TABLE tg_status_messages DROP CONSTRAINT IF EXISTS tg_status_messages_pkey")
+            await c.execute("""
+                DO $$ BEGIN
+                  ALTER TABLE tg_status_messages ADD CONSTRAINT tg_status_messages_status_company_key
+                    UNIQUE (status, company_id);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+            await c.execute("UPDATE tg_status_messages SET company_id=0 WHERE company_id IS NULL")
+        except Exception as e:
+            logging.warning(f"step 31 tg_status_messages PK fix error: {e}")
+        try:
+            existing = {r["status"] for r in await c.fetch("SELECT status FROM tg_status_messages WHERE company_id=0")}
+            for status, enabled, msg_ru, msg_uz in _TG_STATUS_DEFAULTS:
+                if status not in existing:
+                    await c.execute("""
+                        INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
+                        VALUES ($1, $2, $3, $4, 0)
+                        ON CONFLICT DO NOTHING
+                    """, status, enabled, msg_ru, msg_uz)
+        except Exception as e:
+            logging.warning(f"step 31 tg template seed error: {e}")
+    logging.info("✅ API: tg_status_messages multi-tenant PK (step 31) ready")
 
 
 # ══════════════════════════════════════
@@ -4629,12 +4658,51 @@ async def upsert_tg_status_message(status: str, enabled: bool, message_ru: str, 
         row = await conn.fetchrow("""
             INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
             VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (status) DO UPDATE
+            ON CONFLICT (status, company_id) DO UPDATE
               SET enabled=$2, message_ru=$3, message_uz=$4
-            WHERE tg_status_messages.company_id=$5
             RETURNING *
         """, status, enabled, message_ru, message_uz, cid)
         return dict(row) if row else {}
+
+async def get_tg_template_messages() -> list[dict]:
+    """Шаблоны TG-уведомлений суперадмина (company_id=0)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM tg_status_messages WHERE company_id=0 ORDER BY status", )
+        return [dict(r) for r in rows]
+
+async def upsert_tg_template_message(status: str, enabled: bool, message_ru: str, message_uz: str) -> dict:
+    """Редактировать шаблон TG-уведомления суперадмина (company_id=0)."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
+            VALUES ($1, $2, $3, $4, 0)
+            ON CONFLICT (status, company_id) DO UPDATE
+              SET enabled=$2, message_ru=$3, message_uz=$4
+            RETURNING *
+        """, status, enabled, message_ru, message_uz)
+        return dict(row) if row else {}
+
+async def seed_company_tg_messages(company_id: int, force: bool = False):
+    """Копирует TG-шаблоны из company_id=0 в company_id. Если шаблон пустой — использует хардкодные дефолты."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        if not force:
+            existing = await conn.fetchval(
+                "SELECT COUNT(*) FROM tg_status_messages WHERE company_id=$1", company_id)
+            if existing > 0:
+                return
+        template = await conn.fetch(
+            "SELECT status, enabled, message_ru, message_uz FROM tg_status_messages WHERE company_id=0")
+        source = [(r["status"], r["enabled"], r["message_ru"], r["message_uz"]) for r in template] \
+                 if template else _TG_STATUS_DEFAULTS
+        await conn.executemany("""
+            INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (status, company_id) DO NOTHING
+        """, [(s, e, ru, uz, company_id) for s, e, ru, uz in source])
 
 
 async def get_client_by_tg_phone(tg_phone: str) -> dict | None:

@@ -9941,6 +9941,7 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     await db.seed_from_template(company["id"])
     await db.seed_company_services(company["id"])
     await db.seed_company_prices(company["id"])
+    await db.seed_company_tg_messages(company["id"])
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
@@ -10372,6 +10373,33 @@ async def sa_catalog_delete_unit(key: str, _=Depends(get_superadmin)):
     ok = await db.delete_unit(key)
     if not ok:
         raise HTTPException(status_code=404, detail="Единица не найдена")
+    return {"ok": True}
+
+
+class TgTemplateRequest(BaseModel):
+    status: str
+    enabled: bool = True
+    message_ru: str = ""
+    message_uz: str = ""
+
+@app.get("/api/saas/catalog/tg-messages")
+async def sa_catalog_tg_messages(_=Depends(get_superadmin)):
+    rows = await db.get_tg_template_messages()
+    return {"ok": True, "messages": rows}
+
+@app.put("/api/saas/catalog/tg-messages/{status}")
+async def sa_catalog_upsert_tg_message(status: str, req: TgTemplateRequest, _=Depends(get_superadmin)):
+    ALL_STATUSES = {"new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered","cancelled"}
+    if status not in ALL_STATUSES:
+        raise HTTPException(status_code=400, detail="Неизвестный статус")
+    row = await db.upsert_tg_template_message(status, req.enabled, req.message_ru, req.message_uz)
+    return {"ok": True, "message": row}
+
+@app.post("/api/saas/companies/{company_id}/import-tg-messages")
+async def sa_import_tg_messages(company_id: int, _=Depends(get_superadmin)):
+    if company_id <= 0:
+        raise HTTPException(status_code=400, detail="Нельзя применить к шаблону")
+    await db.seed_company_tg_messages(company_id, force=True)
     return {"ok": True}
 
 
