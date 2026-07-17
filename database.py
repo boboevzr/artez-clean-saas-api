@@ -1467,11 +1467,33 @@ async def ensure_saas_schema():
             pass
     logging.info("✅ API: services per-company constraint (step 29) ready")
 
-    # ── Шаг 30: sync template (company_id=0) from company_id=1 if keys differ ──
+    # ── Шаг 30: fix schema + sync template (company_id=0) from company_id=1 ──
     async with pool.acquire() as c:
+        # 30a: ensure template company (id=0) exists so prices FK passes
         try:
-            tpl_keys  = {r["key"] for r in await c.fetch("SELECT key FROM services WHERE company_id=0")}
-            src_keys  = {r["key"] for r in await c.fetch("SELECT key FROM services WHERE company_id=1")}
+            await c.execute("""
+                INSERT INTO companies (id, name, slug, secret_key, plan, active)
+                VALUES (0, 'Template', '__template__', '__template_secret__', 'starter', false)
+                ON CONFLICT (id) DO NOTHING
+            """)
+        except Exception as e:
+            logging.warning(f"step 30a template company error: {e}")
+        # 30b: fix services PK — move from (key) to id BIGSERIAL so company_id=0 rows can coexist
+        try:
+            await c.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS id BIGSERIAL")
+            await c.execute("ALTER TABLE services DROP CONSTRAINT IF EXISTS services_pkey")
+            await c.execute("""
+                DO $$ BEGIN
+                  ALTER TABLE services ADD PRIMARY KEY (id);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+        except Exception as e:
+            logging.warning(f"step 30b services PK error: {e}")
+        # 30c: seed template services from company_id=1
+        try:
+            tpl_keys = {r["key"] for r in await c.fetch("SELECT key FROM services WHERE company_id=0")}
+            src_keys = {r["key"] for r in await c.fetch("SELECT key FROM services WHERE company_id=1")}
             if tpl_keys != src_keys:
                 await c.execute("DELETE FROM services WHERE company_id=0")
                 await c.execute("""
@@ -1482,6 +1504,7 @@ async def ensure_saas_schema():
                 logging.info("✅ API: template services resynced from company_id=1")
         except Exception as e:
             logging.warning(f"step 30 services seed error: {e}")
+        # 30d: seed template prices from company_id=1
         try:
             tpl_pkeys = {(r["service_key"], r["type_key"]) for r in await c.fetch("SELECT service_key, type_key FROM prices WHERE company_id=0")}
             src_pkeys = {(r["service_key"], r["type_key"]) for r in await c.fetch("SELECT service_key, type_key FROM prices WHERE company_id=1")}
