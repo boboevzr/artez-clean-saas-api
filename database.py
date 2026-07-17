@@ -1066,7 +1066,7 @@ async def create_tables():
             ('sofa',        'Диван, кресло',         'Divan, kreslo',       '🛋', 3),
             ('mattress',    'Матрас, одеяло',        'Matras, ko''rpa',     '🛏', 4),
             ('curtains',    'Шторы',                 'Pardalar',            '🪟', 5)
-        ON CONFLICT (key) DO NOTHING;
+        ON CONFLICT DO NOTHING;
         """)
 
     # ── Шаг 16: учёт долгов по заказам ──────────────────────────────────
