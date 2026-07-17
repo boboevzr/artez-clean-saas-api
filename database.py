@@ -1440,46 +1440,55 @@ async def ensure_saas_schema():
 
     # ── Шаг 29: services per-company UNIQUE constraint ────────────────────
     async with pool.acquire() as c:
-        for sql in [
-            "ALTER TABLE services DROP CONSTRAINT IF EXISTS services_key_key",
-            """DO $$ BEGIN ALTER TABLE services ADD CONSTRAINT services_co_key UNIQUE (company_id, key); EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
-        ]:
-            try:
-                await c.execute(sql)
-            except Exception:
-                pass
+        # Drop all existing unique constraints on services.key (whatever they're named)
+        try:
+            rows = await c.fetch("""
+                SELECT conname FROM pg_constraint
+                WHERE conrelid='services'::regclass AND contype='u'
+                  AND array_length(conkey,1)=1
+                  AND conkey[1]=(SELECT attnum FROM pg_attribute
+                                 WHERE attrelid='services'::regclass AND attname='key')
+            """)
+            for r in rows:
+                try:
+                    await c.execute(f'ALTER TABLE services DROP CONSTRAINT IF EXISTS "{r["conname"]}"')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            await c.execute("""
+                DO $$ BEGIN
+                  ALTER TABLE services ADD CONSTRAINT services_co_key UNIQUE (company_id, key);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+        except Exception:
+            pass
     logging.info("✅ API: services per-company constraint (step 29) ready")
 
     # ── Шаг 30: seed template (company_id=0) from company_id=1 if empty ──
     async with pool.acquire() as c:
-        tpl_svcs = await c.fetchval("SELECT COUNT(*) FROM services WHERE company_id=0")
-        if tpl_svcs == 0:
-            rows = await c.fetch(
-                "SELECT key, name_ru, name_uz, emoji, order_idx FROM services WHERE company_id=1"
-            )
-            for r in rows:
-                try:
-                    await c.execute("""
-                        INSERT INTO services (company_id, key, name_ru, name_uz, emoji, order_idx)
-                        VALUES (0, $1, $2, $3, $4, $5)
-                        ON CONFLICT (company_id, key) DO NOTHING
-                    """, r["key"], r["name_ru"], r["name_uz"], r["emoji"], r["order_idx"])
-                except Exception:
-                    pass
-        tpl_prices = await c.fetchval("SELECT COUNT(*) FROM prices WHERE company_id=0")
-        if tpl_prices == 0:
-            rows = await c.fetch(
-                "SELECT service_key, type_key, price, unit_key, min_order FROM prices WHERE company_id=1"
-            )
-            for r in rows:
-                try:
-                    await c.execute("""
-                        INSERT INTO prices (company_id, service_key, type_key, price, unit_key, min_order, updated_at)
-                        VALUES (0, $1, $2, $3, $4, $5, NOW())
-                        ON CONFLICT (company_id, service_key, type_key) DO NOTHING
-                    """, r["service_key"], r["type_key"], r["price"], r["unit_key"], r["min_order"])
-                except Exception:
-                    pass
+        try:
+            tpl_svcs = await c.fetchval("SELECT COUNT(*) FROM services WHERE company_id=0")
+            if tpl_svcs == 0:
+                await c.execute("""
+                    INSERT INTO services (company_id, key, name_ru, name_uz, emoji, order_idx)
+                    SELECT 0, key, name_ru, name_uz, emoji, order_idx
+                    FROM services WHERE company_id=1
+                """)
+        except Exception:
+            pass
+        try:
+            tpl_prices = await c.fetchval("SELECT COUNT(*) FROM prices WHERE company_id=0")
+            if tpl_prices == 0:
+                await c.execute("""
+                    INSERT INTO prices (company_id, service_key, type_key, price, unit_key, min_order, updated_at)
+                    SELECT 0, service_key, type_key, price, unit_key, min_order, NOW()
+                    FROM prices WHERE company_id=1
+                """)
+        except Exception:
+            pass
     logging.info("✅ API: template seeded from company_id=1 (step 30) ready")
 
 
