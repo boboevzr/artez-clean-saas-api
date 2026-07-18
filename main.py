@@ -10491,6 +10491,31 @@ async def sa_catalog_upsert_tg_message(status: str, req: TgTemplateRequest, _=De
     row = await db.upsert_tg_template_message(status, req.enabled, req.message_ru, req.message_uz)
     return {"ok": True, "message": row}
 
+@app.post("/api/saas/catalog/tg-messages/seed")
+async def sa_catalog_seed_tg_messages(_=Depends(get_superadmin)):
+    """Принудительно засеять шаблоны TG-уведомлений для company_id=0."""
+    if not db.pool:
+        raise HTTPException(503, "DB unavailable")
+    # Убедиться что template company существует
+    async with db.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO companies (id, name, slug, secret_key, plan, active)
+            VALUES (0, 'Template', '__template__', '__template_secret__', 'starter', false)
+            ON CONFLICT (id) DO NOTHING
+        """)
+        inserted = 0
+        for status, enabled, msg_ru, msg_uz in db._TG_STATUS_DEFAULTS:
+            r = await conn.execute("""
+                INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
+                SELECT $1, $2, $3, $4, 0
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM tg_status_messages WHERE status=$1 AND company_id=0
+                )
+            """, status, enabled, msg_ru, msg_uz)
+            if r == "INSERT 0 1":
+                inserted += 1
+    return {"ok": True, "inserted": inserted}
+
 @app.post("/api/saas/companies/{company_id}/import-tg-messages")
 async def sa_import_tg_messages(company_id: int, _=Depends(get_superadmin)):
     if company_id <= 0:
