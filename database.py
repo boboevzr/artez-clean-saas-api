@@ -6968,8 +6968,9 @@ async def resync_expense_category_template_from_company1():
     """Пересинхронизировать шаблон расходов (company_id=0) из company_id=1."""
     if not pool: return
     async with pool.acquire() as conn:
+        # NULLS FIRST гарантирует что родители вставятся раньше детей
         src = await conn.fetch(
-            "SELECT * FROM expense_categories WHERE company_id=1 ORDER BY sort_order, id")
+            "SELECT * FROM expense_categories WHERE company_id=1 ORDER BY parent_id NULLS FIRST, sort_order, id")
         await conn.execute("DELETE FROM expense_categories WHERE company_id=0")
         id_map: dict = {}
         for r in src:
