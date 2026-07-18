@@ -1549,12 +1549,51 @@ async def ensure_saas_schema():
             logging.warning(f"step 31 tg template seed error: {e}")
     logging.info("✅ API: tg_status_messages multi-tenant PK (step 31) ready")
 
-    # ── Шаг 32: seed chat_templates + expense_categories into company_id=0 ──
+    # ── Шаг 32: seed chat_templates into company_id=0 ───────────────────────
     try:
         await seed_chat_templates_for_company0()
         logging.info("✅ API: chat_templates template (company_id=0) seeded (step 32)")
     except Exception as e:
         logging.warning(f"step 32 chat template seed error: {e}")
+
+    # ── Шаг 33: force-seed tg_status_messages + expense_categories for company_id=0 ──
+    async with pool.acquire() as c:
+        # 33a: TG messages — bypass PK issues with WHERE NOT EXISTS
+        try:
+            for status, enabled, msg_ru, msg_uz in _TG_STATUS_DEFAULTS:
+                await c.execute("""
+                    INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
+                    SELECT $1, $2, $3, $4, 0
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM tg_status_messages WHERE status=$1 AND company_id=0
+                    )
+                """, status, enabled, msg_ru, msg_uz)
+            logging.info("✅ API: tg_status_messages template (company_id=0) seeded (step 33a)")
+        except Exception as e:
+            logging.warning(f"step 33a tg template seed error: {e}")
+        # 33b: expense_categories — copy from company_id=1 if template is empty
+        try:
+            tpl_count = await c.fetchval(
+                "SELECT COUNT(*) FROM expense_categories WHERE company_id=0")
+            if tpl_count == 0:
+                src = await c.fetch(
+                    "SELECT * FROM expense_categories WHERE company_id=1 ORDER BY sort_order, id")
+                id_map: dict = {}
+                for r in src:
+                    new_parent = id_map.get(r['parent_id']) if r['parent_id'] else None
+                    new_row = await c.fetchrow("""
+                        INSERT INTO expense_categories
+                            (name_ru, name_uz, icon, parent_id, approve_level, receipt_required,
+                             amount_threshold, sort_order, for_staff, active, company_id)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0) RETURNING id
+                    """, r['name_ru'], r['name_uz'], r['icon'], new_parent,
+                         r['approve_level'], r['receipt_required'], r['amount_threshold'],
+                         r['sort_order'], r['for_staff'], r['active'])
+                    if new_row:
+                        id_map[r['id']] = new_row['id']
+                logging.info(f"✅ API: expense_categories template seeded {len(src)} rows from company_id=1 (step 33b)")
+        except Exception as e:
+            logging.warning(f"step 33b expense_categories template seed error: {e}")
 
 
 # ══════════════════════════════════════
