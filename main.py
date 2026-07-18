@@ -10342,6 +10342,11 @@ async def sa_seed_catalog_from_company(_=Depends(get_superadmin)):
         """)
     return {"ok": True, "message": "Template reseeded from company_id=1"}
 
+@app.post("/api/saas/catalog/expense-categories/seed-from-company")
+async def sa_seed_expense_cats_from_company(_=Depends(get_superadmin)):
+    await db.resync_expense_category_template_from_company1()
+    return {"ok": True, "message": "Expense categories template reseeded from company_id=1"}
+
 @app.get("/api/saas/catalog/prices")
 async def sa_catalog_prices(_=Depends(get_superadmin)):
     prices = await db.get_catalog_prices()

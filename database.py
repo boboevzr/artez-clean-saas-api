@@ -6947,6 +6947,8 @@ async def seed_company_expense_categories(company_id: int, force: bool = False):
             "SELECT * FROM expense_categories WHERE company_id=0 ORDER BY sort_order, id")
         if not template:
             return
+        if force:
+            await conn.execute("DELETE FROM expense_categories WHERE company_id=$1", company_id)
         id_map: dict = {}
         for r in template:
             old_id = r['id']
@@ -6961,6 +6963,27 @@ async def seed_company_expense_categories(company_id: int, force: bool = False):
                  r['sort_order'], r['for_staff'], r['active'], company_id)
             if new_row:
                 id_map[old_id] = new_row['id']
+
+async def resync_expense_category_template_from_company1():
+    """Пересинхронизировать шаблон расходов (company_id=0) из company_id=1."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        src = await conn.fetch(
+            "SELECT * FROM expense_categories WHERE company_id=1 ORDER BY sort_order, id")
+        await conn.execute("DELETE FROM expense_categories WHERE company_id=0")
+        id_map: dict = {}
+        for r in src:
+            new_parent = id_map.get(r['parent_id']) if r['parent_id'] else None
+            new_row = await conn.fetchrow("""
+                INSERT INTO expense_categories
+                    (name_ru, name_uz, icon, parent_id, approve_level, receipt_required,
+                     amount_threshold, sort_order, for_staff, active, company_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0) RETURNING id
+            """, r['name_ru'], r['name_uz'], r['icon'], new_parent,
+                 r['approve_level'], r['receipt_required'], r['amount_threshold'],
+                 r['sort_order'], r['for_staff'], r['active'])
+            if new_row:
+                id_map[r['id']] = new_row['id']
 
 # ── Superadmin: chat_templates catalog (company_id=0) ─────────────────
 async def get_chat_templates_for_company(company_id: int) -> list:
