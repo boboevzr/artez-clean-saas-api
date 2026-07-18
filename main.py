@@ -10507,9 +10507,9 @@ async def sa_catalog_seed_tg_messages(_=Depends(get_superadmin)):
         for status, enabled, msg_ru, msg_uz in db._TG_STATUS_DEFAULTS:
             r = await conn.execute("""
                 INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
-                SELECT $1, $2, $3, $4, 0
+                SELECT $1::varchar, $2, $3, $4, 0
                 WHERE NOT EXISTS (
-                    SELECT 1 FROM tg_status_messages WHERE status=$1 AND company_id=0
+                    SELECT 1 FROM tg_status_messages WHERE status=$1::varchar AND company_id=0
                 )
             """, status, enabled, msg_ru, msg_uz)
             if r == "INSERT 0 1":

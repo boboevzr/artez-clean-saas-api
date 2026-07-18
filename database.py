@@ -1563,9 +1563,9 @@ async def ensure_saas_schema():
             for status, enabled, msg_ru, msg_uz in _TG_STATUS_DEFAULTS:
                 await c.execute("""
                     INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz, company_id)
-                    SELECT $1, $2, $3, $4, 0
+                    SELECT $1::varchar, $2, $3, $4, 0
                     WHERE NOT EXISTS (
-                        SELECT 1 FROM tg_status_messages WHERE status=$1 AND company_id=0
+                        SELECT 1 FROM tg_status_messages WHERE status=$1::varchar AND company_id=0
                     )
                 """, status, enabled, msg_ru, msg_uz)
             logging.info("✅ API: tg_status_messages template (company_id=0) seeded (step 33a)")
