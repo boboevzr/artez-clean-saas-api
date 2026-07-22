@@ -5217,6 +5217,7 @@ async def claim_measure_review(item_id: int, staff_id: int) -> dict:
 async def get_pending_measure_reviews() -> list:
     """Все замеры со статусом 'submitted' с информацией о заказе и кто принял."""
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT oi.id AS item_id, oi.order_id, oi.service, oi.review_claimed_by,
@@ -5227,17 +5228,19 @@ async def get_pending_measure_reviews() -> list:
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
             LEFT JOIN staff s ON s.id = oi.review_claimed_by
-            WHERE oi.measure_status = 'submitted'
+            WHERE oi.measure_status = 'submitted' AND oi.company_id = $1
             ORDER BY oi.id ASC
-        """)
+        """, cid)
         return [dict(r) for r in rows]
 
 async def get_all_approvers() -> list:
     """Все сотрудники у которых can_approve_measure = true."""
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id FROM staff WHERE can_approve_measure=TRUE AND active=TRUE"
+            "SELECT id FROM staff WHERE can_approve_measure=TRUE AND active=TRUE AND company_id=$1",
+            cid
         )
         return [dict(r) for r in rows]
 

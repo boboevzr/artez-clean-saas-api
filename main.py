@@ -259,55 +259,57 @@ async def _sms_dispatch_worker():
 
 
 async def _measure_review_worker():
-    """Каждые 5 минут: один сводный push на каждого проверяющего."""
+    """Каждые 5 минут: один сводный push на каждого проверяющего, по каждой компании отдельно."""
     await asyncio.sleep(30)
     while True:
         try:
             from datetime import datetime, timezone
-            reviews   = await db.get_pending_measure_reviews()
-            approvers = await db.get_all_approvers()
-            if not reviews:
-                await asyncio.sleep(300)
-                continue
-            now = datetime.now(timezone.utc)
+            companies = await db.get_all_companies()
+            for company in companies:
+                db.set_request_company(company["id"])
+                reviews   = await db.get_pending_measure_reviews()
+                if not reviews:
+                    continue
+                approvers = await db.get_all_approvers()
+                now = datetime.now(timezone.utc)
 
-            # Замеры которые принял кто-то и прошло > 5 мин — напомнить именно ему
-            reminded_claimer = set()
-            for rev in reviews:
-                claimed_by = rev.get("review_claimed_by")
-                claimed_at = rev.get("review_claimed_at")
-                if claimed_by and claimed_at and claimed_by not in reminded_claimer:
-                    elapsed = (now - claimed_at.replace(tzinfo=timezone.utc)).total_seconds()
-                    if elapsed > 300:
-                        order_num = rev.get("order_num") or f"#{rev['order_id']}"
+                # Замеры которые принял кто-то и прошло > 5 мин — напомнить именно ему
+                reminded_claimer = set()
+                for rev in reviews:
+                    claimed_by = rev.get("review_claimed_by")
+                    claimed_at = rev.get("review_claimed_at")
+                    if claimed_by and claimed_at and claimed_by not in reminded_claimer:
+                        elapsed = (now - claimed_at.replace(tzinfo=timezone.utc)).total_seconds()
+                        if elapsed > 300:
+                            order_num = rev.get("order_num") or f"#{rev['order_id']}"
+                            asyncio.create_task(send_web_push(
+                                claimed_by, "⏰ Не забудь проверить замеры",
+                                f"Принятые замеры ждут утверждения (заказ {order_num})",
+                                order_id=rev["order_id"], item_id=rev["item_id"], push_type="measure"
+                            ))
+                            reminded_claimer.add(claimed_by)
+
+                # Незаклеймленные — один сводный пуш на каждого проверяющего
+                unclaimed = [r for r in reviews if not r.get("review_claimed_by")]
+                if unclaimed:
+                    cnt = len(unclaimed)
+                    if cnt == 1:
+                        r = unclaimed[0]
+                        title = f"📐 Замер на проверку — {r.get('order_num') or '#'+str(r['order_id'])}"
+                        body  = f"«{r.get('service') or 'позиция'}» ожидает утверждения"
+                        first_order_id = r["order_id"]
+                        first_item_id  = r["item_id"]
+                    else:
+                        orders = list({r["order_id"] for r in unclaimed})
+                        title = f"📐 {cnt} замеров ожидают проверки"
+                        body  = f"Заказов: {len(orders)} · Нажмите для просмотра"
+                        first_order_id = unclaimed[0]["order_id"]
+                        first_item_id  = unclaimed[0]["item_id"]
+                    for approver in approvers:
                         asyncio.create_task(send_web_push(
-                            claimed_by, "⏰ Не забудь проверить замеры",
-                            f"Принятые замеры ждут утверждения (заказ {order_num})",
-                            order_id=rev["order_id"], item_id=rev["item_id"], push_type="measure"
+                            approver["id"], title, body,
+                            order_id=first_order_id, item_id=first_item_id, push_type="measure"
                         ))
-                        reminded_claimer.add(claimed_by)
-
-            # Незаклеймленные — один сводный пуш на каждого проверяющего
-            unclaimed = [r for r in reviews if not r.get("review_claimed_by")]
-            if unclaimed:
-                cnt = len(unclaimed)
-                if cnt == 1:
-                    r = unclaimed[0]
-                    title = f"📐 Замер на проверку — {r.get('order_num') or '#'+str(r['order_id'])}"
-                    body  = f"«{r.get('service') or 'позиция'}» ожидает утверждения"
-                    first_order_id = r["order_id"]
-                    first_item_id  = r["item_id"]
-                else:
-                    orders = list({r["order_id"] for r in unclaimed})
-                    title = f"📐 {cnt} замеров ожидают проверки"
-                    body  = f"Заказов: {len(orders)} · Нажмите для просмотра"
-                    first_order_id = unclaimed[0]["order_id"]
-                    first_item_id  = unclaimed[0]["item_id"]
-                for approver in approvers:
-                    asyncio.create_task(send_web_push(
-                        approver["id"], title, body,
-                        order_id=first_order_id, item_id=first_item_id, push_type="measure"
-                    ))
         except Exception as e:
             logging.warning(f"measure_review_worker error: {e}")
         await asyncio.sleep(300)
@@ -6387,6 +6389,13 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                               actual_width_cm: float = Body(None, embed=True),
                               actual_length_cm: float = Body(None, embed=True),
                               note: str = Body("", embed=True)):
+    is_admin = staff.get("role") == "admin"
+    if action == "submit" and not (staff.get("can_measure") or is_admin):
+        raise HTTPException(status_code=403, detail="Нет прав для проведения замера")
+    if action in ("approve", "reject") and not (staff.get("can_approve_measure") or is_admin):
+        raise HTTPException(status_code=403, detail="Нет прав для проверки замеров")
+    if action == "direct_approve" and not (staff.get("can_override_measure") or is_admin):
+        raise HTTPException(status_code=403, detail="Нет прав для переопределения замера")
     if action == "submit":
         if not actual_width_cm or not actual_length_cm:
             raise HTTPException(status_code=400, detail="Укажите ширину и длину")
