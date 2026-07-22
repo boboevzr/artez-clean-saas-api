@@ -8691,9 +8691,10 @@ class _AutodialCreate(BaseModel):
     sched_date_to:   Optional[str] = None
 
 @app.get("/api/admin/autodial/campaigns")
-async def autodial_list(_=Depends(_get_admin)):
+async def autodial_list(ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM autodial_campaigns ORDER BY created_at DESC")
+        rows = await conn.fetch(
+            "SELECT * FROM autodial_campaigns WHERE company_id=$1 ORDER BY created_at DESC", ccid)
     return [dict(r) for r in rows]
 
 def _parse_time(s):
@@ -8713,13 +8714,13 @@ def _parse_date(s):
     except Exception: return None
 
 @app.post("/api/admin/autodial/campaigns")
-async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
+async def autodial_create(body: _AutodialCreate, ccid: int = Depends(_get_admin_cid)):
     import json as _json
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
             "INSERT INTO autodial_campaigns "
-            "(name,ivr_exten,max_parallel,group_ids,sched_time_from,sched_time_to,sched_days,sched_date_from,sched_date_to) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
+            "(name,ivr_exten,max_parallel,group_ids,sched_time_from,sched_time_to,sched_days,sched_date_from,sched_date_to,company_id) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
             body.name, body.ivr_exten, body.max_parallel,
             _json.dumps(body.group_ids),
             _parse_time(body.sched_time_from) or _parse_time("09:00"),
@@ -8727,11 +8728,12 @@ async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
             body.sched_days or [0,1,2,3,4,5,6],
             _parse_date(body.sched_date_from),
             _parse_date(body.sched_date_to),
+            ccid,
         )
     return dict(row)
 
 @app.put("/api/admin/autodial/campaigns/{cid}")
-async def autodial_update(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
+async def autodial_update(cid: int, body: dict = Body(...), ccid: int = Depends(_get_admin_cid)):
     import json as _json
     allowed = {'name','ivr_exten','max_parallel','sched_time_from','sched_time_to',
                'sched_days','sched_date_from','sched_date_to','group_ids'}
@@ -8748,21 +8750,24 @@ async def autodial_update(cid: int, body: dict = Body(...), _=Depends(_get_admin
         else:
             fields[k] = v or None
     sets = ', '.join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    cid_param = len(fields) + 2
     async with db.pool.acquire() as conn:
-        await conn.execute(f"UPDATE autodial_campaigns SET {sets} WHERE id=$1", cid, *fields.values())
+        await conn.execute(
+            f"UPDATE autodial_campaigns SET {sets} WHERE id=$1 AND company_id=${cid_param}",
+            cid, *fields.values(), ccid)
     return {"ok": True}
 
 @app.get("/api/admin/autodial/campaigns/{cid}")
-async def autodial_get(cid: int, _=Depends(_get_admin)):
+async def autodial_get(cid: int, ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
+        row = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1 AND company_id=$2", cid, ccid)
     if not row: raise HTTPException(404)
     return dict(row)
 
 @app.post("/api/admin/autodial/campaigns/{cid}/start")
-async def autodial_start(cid: int, _=Depends(_get_admin)):
+async def autodial_start(cid: int, ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
+        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1 AND company_id=$2", cid, ccid)
     if not campaign: raise HTTPException(404)
     if campaign["status"] == "running": raise HTTPException(400, "Already running")
 
@@ -8818,7 +8823,9 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
             # Fallback: старая логика если группы не выбраны
             async with db.pool.acquire() as conn:
                 crows = await conn.fetch(
-                    "SELECT id, phone, first_name, last_name FROM crm_clients WHERE phone IS NOT NULL AND phone != '' ORDER BY id"
+                    "SELECT id, phone, first_name, last_name FROM crm_clients "
+                    "WHERE phone IS NOT NULL AND phone != '' AND company_id=$1 ORDER BY id",
+                    ccid
                 )
             for r in crows:
                 p = _ami_phone((r["phone"] or "").strip())
@@ -8829,8 +8836,8 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
         if rows_to_insert:
             async with db.pool.acquire() as conn:
                 await conn.executemany(
-                    "INSERT INTO autodial_calls (campaign_id,source_type,source_id,phone,name) VALUES ($1,$2,$3,$4,$5)",
-                    [(cid, r[0], r[1], r[2], r[3]) for r in rows_to_insert]
+                    "INSERT INTO autodial_calls (campaign_id,source_type,source_id,phone,name,company_id) VALUES ($1,$2,$3,$4,$5,$6)",
+                    [(cid, r[0], r[1], r[2], r[3], ccid) for r in rows_to_insert]
                 )
                 await conn.execute("UPDATE autodial_campaigns SET total_count=$1 WHERE id=$2", len(rows_to_insert), cid)
 
@@ -8841,9 +8848,9 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
     return {"ok": True}
 
 @app.post("/api/admin/autodial/campaigns/{cid}/retry")
-async def autodial_retry(cid: int, _=Depends(_get_admin)):
+async def autodial_retry(cid: int, ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
+        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1 AND company_id=$2", cid, ccid)
     if not campaign: raise HTTPException(404)
     if campaign["status"] == "running": raise HTTPException(400, "Already running")
     async with db.pool.acquire() as conn:
@@ -8867,25 +8874,28 @@ async def autodial_retry(cid: int, _=Depends(_get_admin)):
     return {"ok": True}
 
 @app.post("/api/admin/autodial/campaigns/{cid}/pause")
-async def autodial_pause(cid: int, _=Depends(_get_admin)):
+async def autodial_pause(cid: int, ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        await conn.execute("UPDATE autodial_campaigns SET status='paused' WHERE id=$1", cid)
+        await conn.execute("UPDATE autodial_campaigns SET status='paused' WHERE id=$1 AND company_id=$2", cid, ccid)
     return {"ok": True}
 
 @app.post("/api/admin/autodial/campaigns/{cid}/stop")
-async def autodial_stop(cid: int, _=Depends(_get_admin)):
+async def autodial_stop(cid: int, ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        await conn.execute("UPDATE autodial_campaigns SET status='stopped', finished_at=NOW() WHERE id=$1", cid)
+        await conn.execute(
+            "UPDATE autodial_campaigns SET status='stopped', finished_at=NOW() WHERE id=$1 AND company_id=$2", cid, ccid)
     return {"ok": True}
 
 @app.get("/api/admin/autodial/campaigns/{cid}/calls")
-async def autodial_calls(cid: int, _=Depends(_get_admin)):
+async def autodial_calls(cid: int, ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT id FROM autodial_campaigns WHERE id=$1 AND company_id=$2", cid, ccid):
+            raise HTTPException(404)
         rows = await conn.fetch("SELECT * FROM autodial_calls WHERE campaign_id=$1 ORDER BY id", cid)
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/autodial/campaigns/{cid}/create-group")
-async def autodial_create_group_from_calls(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
+async def autodial_create_group_from_calls(cid: int, body: dict = Body(...), ccid: int = Depends(_get_admin_cid)):
     """Создать группу автодозвона из звонков с нужным статусом (answered / no_answer / all)"""
     import re as _re
     status_filter = body.get("status", "answered")
@@ -8893,7 +8903,7 @@ async def autodial_create_group_from_calls(cid: int, body: dict = Body(...), _=D
     if not group_name:
         raise HTTPException(400, "name required")
     async with db.pool.acquire() as conn:
-        if not await conn.fetchrow("SELECT id FROM autodial_campaigns WHERE id=$1", cid):
+        if not await conn.fetchrow("SELECT id FROM autodial_campaigns WHERE id=$1 AND company_id=$2", cid, ccid):
             raise HTTPException(404)
         if status_filter == "all":
             calls = await conn.fetch(
@@ -8903,7 +8913,8 @@ async def autodial_create_group_from_calls(cid: int, body: dict = Body(...), _=D
                 "SELECT DISTINCT phone, name FROM autodial_calls WHERE campaign_id=$1 AND status=$2", cid, status_filter)
         if not calls:
             raise HTTPException(400, "Нет звонков с таким статусом")
-        group = await conn.fetchrow("INSERT INTO autodial_groups (name) VALUES ($1) RETURNING *", group_name)
+        group = await conn.fetchrow(
+            "INSERT INTO autodial_groups (name,company_id) VALUES ($1,$2) RETURNING *", group_name, ccid)
         gid = group["id"]
         inserted = 0
         for c in calls:
@@ -8911,19 +8922,19 @@ async def autodial_create_group_from_calls(cid: int, body: dict = Body(...), _=D
             if not phone:
                 continue
             await conn.execute(
-                "INSERT INTO autodial_group_members (group_id,phone,name,source_type) "
-                "VALUES ($1,$2,$3,'campaign') ON CONFLICT (group_id,phone) DO NOTHING",
-                gid, phone, c["name"] or "")
+                "INSERT INTO autodial_group_members (group_id,phone,name,source_type,company_id) "
+                "VALUES ($1,$2,$3,'campaign',$4) ON CONFLICT (group_id,phone) DO NOTHING",
+                gid, phone, c["name"] or "", ccid)
             inserted += 1
     return {"ok": True, "group_id": gid, "group_name": group_name, "inserted": inserted}
 
 
 @app.post("/api/admin/autodial/campaigns/{cid}/fork")
-async def autodial_fork(cid: int, _=Depends(_get_admin)):
+async def autodial_fork(cid: int, ccid: int = Depends(_get_admin_cid)):
     """Создать повтор-кампанию /2 из недозвонившихся"""
     import re as _re
     async with db.pool.acquire() as conn:
-        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
+        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1 AND company_id=$2", cid, ccid)
         if not campaign:
             raise HTTPException(404)
         calls = await conn.fetch(
@@ -8932,68 +8943,68 @@ async def autodial_fork(cid: int, _=Depends(_get_admin)):
             raise HTTPException(400, "Нет недозвонившихся")
         base_name = _re.sub(r'\s*/\s*\d+$', '', campaign["name"]).strip()
         count = await conn.fetchval(
-            "SELECT COUNT(*) FROM autodial_campaigns WHERE name ~ $1",
-            r'^' + _re.escape(base_name) + r'(\s*/\s*\d+)?$')
+            "SELECT COUNT(*) FROM autodial_campaigns WHERE name ~ $1 AND company_id=$2",
+            r'^' + _re.escape(base_name) + r'(\s*/\s*\d+)?$', ccid)
         new_name = f"{base_name} / {count + 1}"
         new_camp = await conn.fetchrow(
             "INSERT INTO autodial_campaigns (name,source_type,ivr_exten,max_parallel,caller_id,"
-            "sched_time_from,sched_time_to,sched_days) VALUES ($1,'fork',$2,$3,$4,$5,$6,$7) RETURNING *",
+            "sched_time_from,sched_time_to,sched_days,company_id) VALUES ($1,'fork',$2,$3,$4,$5,$6,$7,$8) RETURNING *",
             new_name, campaign["ivr_exten"], campaign["max_parallel"] or 1,
             campaign["caller_id"] or "1000", campaign["sched_time_from"],
-            campaign["sched_time_to"], campaign["sched_days"])
+            campaign["sched_time_to"], campaign["sched_days"], ccid)
         new_cid = new_camp["id"]
         for c in calls:
             phone = _ami_phone(str(c["phone"]).strip())
             if phone:
                 await conn.execute(
-                    "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'fork',$2,$3)",
-                    new_cid, phone, c["name"] or "")
+                    "INSERT INTO autodial_calls (campaign_id,source_type,phone,name,company_id) VALUES ($1,'fork',$2,$3,$4)",
+                    new_cid, phone, c["name"] or "", ccid)
         total = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1", new_cid)
         await conn.execute("UPDATE autodial_campaigns SET total_count=$2 WHERE id=$1", new_cid, total)
     return {"ok": True, "campaign_id": new_cid, "name": new_name, "total": int(total)}
 
 
 @app.post("/api/admin/autodial/campaigns/{cid}/clone")
-async def autodial_clone(cid: int, _=Depends(_get_admin)):
+async def autodial_clone(cid: int, ccid: int = Depends(_get_admin_cid)):
     """Клонировать кампанию со всеми контактами"""
     import re as _re
     async with db.pool.acquire() as conn:
-        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
+        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1 AND company_id=$2", cid, ccid)
         if not campaign:
             raise HTTPException(404)
         calls = await conn.fetch("SELECT phone, name FROM autodial_calls WHERE campaign_id=$1", cid)
         base_name = _re.sub(r'\s*\(копия\s*\d*\)\s*$', '', campaign["name"]).strip()
         count = await conn.fetchval(
-            "SELECT COUNT(*) FROM autodial_campaigns WHERE name ~ $1",
-            r'^' + _re.escape(base_name) + r'(\s*\(копия(\s*\d+)?\))?$')
+            "SELECT COUNT(*) FROM autodial_campaigns WHERE name ~ $1 AND company_id=$2",
+            r'^' + _re.escape(base_name) + r'(\s*\(копия(\s*\d+)?\))?$', ccid)
         suffix = "" if count == 1 else f" {count}"
         new_name = f"{base_name} (копия{suffix})"
         new_camp = await conn.fetchrow(
             "INSERT INTO autodial_campaigns (name,source_type,ivr_exten,max_parallel,caller_id,"
-            "sched_time_from,sched_time_to,sched_days) VALUES ($1,'manual',$2,$3,$4,$5,$6,$7) RETURNING *",
+            "sched_time_from,sched_time_to,sched_days,company_id) VALUES ($1,'manual',$2,$3,$4,$5,$6,$7,$8) RETURNING *",
             new_name, campaign["ivr_exten"], campaign["max_parallel"] or 1,
             campaign["caller_id"] or "1000", campaign["sched_time_from"],
-            campaign["sched_time_to"], campaign["sched_days"])
+            campaign["sched_time_to"], campaign["sched_days"], ccid)
         new_cid = new_camp["id"]
         for c in calls:
             phone = _ami_phone(str(c["phone"]).strip())
             if phone:
                 await conn.execute(
-                    "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'clone',$2,$3)",
-                    new_cid, phone, c["name"] or "")
+                    "INSERT INTO autodial_calls (campaign_id,source_type,phone,name,company_id) VALUES ($1,'clone',$2,$3,$4)",
+                    new_cid, phone, c["name"] or "", ccid)
         total = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1", new_cid)
         await conn.execute("UPDATE autodial_campaigns SET total_count=$2 WHERE id=$1", new_cid, total)
     return {"ok": True, "campaign_id": new_cid, "name": new_name}
 
 
 @app.delete("/api/admin/autodial/campaigns/{cid}")
-async def autodial_delete(cid: int, _=Depends(_get_admin)):
+async def autodial_delete(cid: int, ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        await conn.execute("DELETE FROM autodial_campaigns WHERE id=$1", cid)
+        await conn.execute("DELETE FROM autodial_campaigns WHERE id=$1 AND company_id=$2", cid, ccid)
     return {"ok": True}
 
 @app.post("/api/admin/autodial/test")
-async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):
+async def autodial_test(body: dict = Body(...), ccid: int = Depends(_get_admin_cid)):
     """
     Создаёт одноразовую кампанию с одним номером — агент (autodial_agent.py)
     подхватит её и позвонит. Агент должен работать ЛОКАЛЬНО (в сети АТС 192.168.1.x).
@@ -9005,14 +9016,14 @@ async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
         label = phones[0] if len(phones) == 1 else f"{phones[0]} +{len(phones)-1}"
         camp = await conn.fetchrow(
-            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
-            "VALUES ($1,$2,$3,'manual','running') RETURNING *",
-            f"Тест {label}", exten, len(phones)
+            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status,company_id) "
+            "VALUES ($1,$2,$3,'manual','running',$4) RETURNING *",
+            f"Тест {label}", exten, len(phones), ccid
         )
         for p in phones:
             await conn.execute(
-                "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'manual',$2,'Тест')",
-                camp["id"], p
+                "INSERT INTO autodial_calls (campaign_id,source_type,phone,name,company_id) VALUES ($1,'manual',$2,'Тест',$3)",
+                camp["id"], p, ccid
             )
         await conn.execute(
             "UPDATE autodial_campaigns SET total_count=$1 WHERE id=$2", len(phones), camp["id"]
