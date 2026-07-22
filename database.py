@@ -4350,9 +4350,10 @@ async def upsert_contact(phone: str, first_name: str = "", last_name: str = "",
 
 
 async def bulk_insert_contacts(rows: list[dict]) -> dict:
-    """Массовая вставка контактов. Возвращает {ok, dup, err}."""
+    """Массовая вставка контактов своей компании. Возвращает {ok, dup, err}."""
     if not pool:
         return {"ok": 0, "dup": 0, "err": len(rows)}
+    cid = _cid()
     ok = dup = err = 0
     async with pool.acquire() as conn:
         for r in rows:
@@ -4363,8 +4364,8 @@ async def bulk_insert_contacts(rows: list[dict]) -> dict:
             try:
                 res = await conn.fetchval("""
                     INSERT INTO contacts
-                        (phone, first_name, last_name, middle_name, phone2, address, short_address, source)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                        (phone, first_name, last_name, middle_name, phone2, address, short_address, source, company_id)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                     ON CONFLICT (phone) DO NOTHING
                     RETURNING id
                 """,
@@ -4376,6 +4377,7 @@ async def bulk_insert_contacts(rows: list[dict]) -> dict:
                     str(r.get("address",       "") or "").strip(),
                     str(r.get("short_address", "") or "").strip(),
                     str(r.get("source", "Старая база")),
+                    cid,
                 )
                 if res:
                     ok += 1
@@ -4467,11 +4469,12 @@ async def delete_contact(contact_id: int) -> bool:
 
 
 async def delete_all_contacts() -> int:
-    """Удалить все записи из contacts. Возвращает количество удалённых."""
+    """Удалить все записи из contacts своей компании. Возвращает количество удалённых."""
     if not pool:
         return 0
+    cid = _cid()
     async with pool.acquire() as conn:
-        res = await conn.execute("DELETE FROM contacts")
+        res = await conn.execute("DELETE FROM contacts WHERE company_id=$1", cid)
         # res == "DELETE 41234"
         try:
             return int(res.split()[-1])
