@@ -9024,46 +9024,48 @@ async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):
 # ── Группы контактов автодозвона ───────────────────────────────────────────
 
 @app.get("/api/admin/autodial/groups")
-async def adg_list(_=Depends(_get_admin)):
+async def adg_list(cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT g.*, COUNT(m.id) AS member_count FROM autodial_groups g "
             "LEFT JOIN autodial_group_members m ON m.group_id = g.id "
-            "GROUP BY g.id ORDER BY g.name"
+            "WHERE g.company_id=$1 "
+            "GROUP BY g.id ORDER BY g.name",
+            cid
         )
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/autodial/groups")
-async def adg_create(body: dict = Body(...), _=Depends(_get_admin)):
+async def adg_create(body: dict = Body(...), cid: int = Depends(_get_admin_cid)):
     name  = (body.get("name") or "").strip()
     notes = (body.get("notes") or "").strip()
     if not name: raise HTTPException(400, "name required")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO autodial_groups (name,notes) VALUES ($1,$2) RETURNING *", name, notes
+            "INSERT INTO autodial_groups (name,notes,company_id) VALUES ($1,$2,$3) RETURNING *", name, notes, cid
         )
     return dict(row)
 
 @app.put("/api/admin/autodial/groups/{gid}")
-async def adg_update(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+async def adg_update(gid: int, body: dict = Body(...), cid: int = Depends(_get_admin_cid)):
     name  = (body.get("name") or "").strip()
     notes = (body.get("notes") or "").strip()
     if not name: raise HTTPException(400, "name required")
     async with db.pool.acquire() as conn:
-        await conn.execute("UPDATE autodial_groups SET name=$1,notes=$2 WHERE id=$3", name, notes, gid)
+        await conn.execute("UPDATE autodial_groups SET name=$1,notes=$2 WHERE id=$3 AND company_id=$4", name, notes, gid, cid)
     return {"ok": True}
 
 @app.delete("/api/admin/autodial/groups/{gid}")
-async def adg_delete(gid: int, _=Depends(_get_admin)):
+async def adg_delete(gid: int, cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        await conn.execute("DELETE FROM autodial_groups WHERE id=$1", gid)
+        await conn.execute("DELETE FROM autodial_groups WHERE id=$1 AND company_id=$2", gid, cid)
     return {"ok": True}
 
 @app.get("/api/admin/autodial/groups/{gid}/members")
-async def adg_members(gid: int, _=Depends(_get_admin)):
+async def adg_members(gid: int, cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM autodial_group_members WHERE group_id=$1 ORDER BY name, phone", gid
+            "SELECT * FROM autodial_group_members WHERE group_id=$1 AND company_id=$2 ORDER BY name, phone", gid, cid
         )
     return [dict(r) for r in rows]
 
@@ -9076,21 +9078,23 @@ def _ami_phone(phone: str) -> str:
     return p
 
 @app.post("/api/admin/autodial/groups/{gid}/members")
-async def adg_add_members(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+async def adg_add_members(gid: int, body: dict = Body(...), cid: int = Depends(_get_admin_cid)):
     """Добавляет участников в группу. phones: [{phone,name,source_type,source_id}]"""
     members = body.get("members") or []
     if not members: raise HTTPException(400, "members required")
     inserted = 0
     async with db.pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT id FROM autodial_groups WHERE id=$1 AND company_id=$2", gid, cid):
+            raise HTTPException(404, "Группа не найдена")
         for m in members:
             phone = _ami_phone((m.get("phone") or "").strip())
             if not phone: continue
             try:
                 await conn.execute(
-                    "INSERT INTO autodial_group_members (group_id,phone,name,source_type,source_id) "
-                    "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (group_id,phone) DO NOTHING",
+                    "INSERT INTO autodial_group_members (group_id,phone,name,source_type,source_id,company_id) "
+                    "VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (group_id,phone) DO NOTHING",
                     gid, phone, (m.get("name") or "").strip(),
-                    m.get("source_type") or "manual", m.get("source_id")
+                    m.get("source_type") or "manual", m.get("source_id"), cid
                 )
                 inserted += 1
             except Exception:
@@ -9098,13 +9102,15 @@ async def adg_add_members(gid: int, body: dict = Body(...), _=Depends(_get_admin
     return {"ok": True, "inserted": inserted}
 
 @app.post("/api/admin/autodial/groups/{gid}/members/import-all")
-async def adg_import_all(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+async def adg_import_all(gid: int, body: dict = Body(...), cid: int = Depends(_get_admin_cid)):
     """Серверный массовый импорт по фильтру — для любого объёма без загрузки в браузер."""
     src    = body.get("source", "both")
     q      = (body.get("q") or "").strip()
     prefix = (body.get("prefix") or "").strip()
     letter = (body.get("letter") or "").strip()
     async with db.pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT id FROM autodial_groups WHERE id=$1 AND company_id=$2", gid, cid):
+            raise HTTPException(404, "Группа не найдена")
         where_parts = ["phone IS NOT NULL AND phone != ''"]
         params: list = []
         i = 1
@@ -9116,6 +9122,7 @@ async def adg_import_all(gid: int, body: dict = Body(...), _=Depends(_get_admin)
         if letter:
             where_parts.append(f"(first_name ILIKE ${i} OR last_name ILIKE ${i})")
             params.append(f"{letter}%"); i += 1
+        where_parts.append(f"company_id = ${i}"); params.append(cid); i += 1
         w = ' AND '.join(where_parts)
         # нормализация телефона: убрать не-цифры, срезать +998 если 11+ цифр
         phone_expr = (
@@ -9140,9 +9147,11 @@ async def adg_import_all(gid: int, body: dict = Body(...), _=Depends(_get_admin)
         union_sql = ' UNION ALL '.join(parts)
         gid_idx = i
         params.append(gid)
+        cid_idx = i + 1
+        params.append(cid)
         result = await conn.execute(
-            f"INSERT INTO autodial_group_members (group_id,phone,name,source_type,source_id) "
-            f"SELECT ${gid_idx}::int, np, nm, st, sid FROM ({union_sql}) t WHERE length(np) >= 7 "
+            f"INSERT INTO autodial_group_members (group_id,phone,name,source_type,source_id,company_id) "
+            f"SELECT ${gid_idx}::int, np, nm, st, sid, ${cid_idx}::int FROM ({union_sql}) t WHERE length(np) >= 7 "
             f"ON CONFLICT (group_id,phone) DO NOTHING",
             *params
         )
@@ -9150,15 +9159,16 @@ async def adg_import_all(gid: int, body: dict = Body(...), _=Depends(_get_admin)
     return {"ok": True, "inserted": inserted}
 
 @app.delete("/api/admin/autodial/groups/{gid}/members/{mid}")
-async def adg_del_member(gid: int, mid: int, _=Depends(_get_admin)):
+async def adg_del_member(gid: int, mid: int, cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        await conn.execute("DELETE FROM autodial_group_members WHERE id=$1 AND group_id=$2", mid, gid)
+        await conn.execute(
+            "DELETE FROM autodial_group_members WHERE id=$1 AND group_id=$2 AND company_id=$3", mid, gid, cid)
     return {"ok": True}
 
 @app.get("/api/admin/autodial/contacts-browse")
 async def adg_contacts_browse(
     q: str = "", prefix: str = "", letter: str = "", source: str = "both",
-    limit: int = 100, offset: int = 0, _=Depends(_get_admin)
+    limit: int = 100, offset: int = 0, cid: int = Depends(_get_admin_cid)
 ):
     """Поиск клиентов/контактов для импорта — с пагинацией и общим счётчиком."""
     async with db.pool.acquire() as conn:
@@ -9173,6 +9183,7 @@ async def adg_contacts_browse(
         if letter:
             where_parts.append(f"(first_name ILIKE ${i} OR last_name ILIKE ${i})")
             params.append(f"{letter}%"); i += 1
+        where_parts.append(f"company_id = ${i}"); params.append(cid); i += 1
         w = ' AND '.join(where_parts)
 
         parts = []
