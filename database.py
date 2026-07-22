@@ -1731,6 +1731,10 @@ async def update_user_name(user_id: int, first_name: str):
 
 
 async def update_user_password(user_id: int, password_hash: str):
+    # NB: без company_id-фильтра нарочно — вызывается и из self-service /api/me/password
+    # (клиентский JWT НЕ содержит company_id, см. create_token(); _cid() там всегда даст
+    # дефолт 1 и сломает смену пароля для всех остальных компаний). Для admin-эндпоинта
+    # (admin_reset_site_user_password) владение user_id проверяется на вызывающей стороне.
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -1739,6 +1743,7 @@ async def update_user_password(user_id: int, password_hash: str):
 
 async def get_all_site_users(search: str = "", limit: int = 500):
     if not pool: return []
+    cid = _cid()
     base = """
         SELECT u.id, u.phone, u.first_name, u.is_verified, u.tg_id,
                u.address, u.car_plate, u.osago_expiry,
@@ -1749,9 +1754,18 @@ async def get_all_site_users(search: str = "", limit: int = 500):
     async with pool.acquire() as conn:
         if search:
             return await conn.fetch(
-                base + "WHERE u.phone ILIKE $1 OR u.first_name ILIKE $1 ORDER BY u.created_at DESC LIMIT $2",
-                f"%{search}%", limit)
-        return await conn.fetch(base + "ORDER BY u.created_at DESC LIMIT $1", limit)
+                base + "WHERE u.company_id=$1 AND (u.phone ILIKE $2 OR u.first_name ILIKE $2) ORDER BY u.created_at DESC LIMIT $3",
+                cid, f"%{search}%", limit)
+        return await conn.fetch(base + "WHERE u.company_id=$1 ORDER BY u.created_at DESC LIMIT $2", cid, limit)
+
+
+async def get_site_user_in_company(user_id: int, company_id: int) -> bool:
+    """Проверка владения перед admin-действием над users (сам update/delete не фильтрует
+    company_id — см. комментарии в update_user_password/update_user_profile)."""
+    if not pool: return False
+    async with pool.acquire() as conn:
+        return bool(await conn.fetchval(
+            "SELECT 1 FROM users WHERE id=$1 AND company_id=$2", user_id, company_id))
 
 
 async def update_user_last_login(user_id: int):
@@ -1762,6 +1776,8 @@ async def update_user_last_login(user_id: int):
 
 async def update_user_profile(user_id: int, first_name: str, address: str = None,
                                car_plate: str = None, osago_expiry=None):
+    # NB: без company_id-фильтра — тоже вызывается из self-service /api/me (см. комментарий
+    # в update_user_password). Admin-эндпоинт проверяет владение user_id до вызова.
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -1814,9 +1830,11 @@ async def set_user_tg_id(phone: str, tg_id: int):
 
 
 async def delete_site_user(user_id: int) -> bool:
+    """Admin-only (см. admin_delete_site_user) — company_id можно фильтровать напрямую."""
     if not pool: return False
+    cid = _cid()
     async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM users WHERE id=$1", user_id)
+        result = await conn.execute("DELETE FROM users WHERE id=$1 AND company_id=$2", user_id, cid)
     return result != "DELETE 0"
 
 

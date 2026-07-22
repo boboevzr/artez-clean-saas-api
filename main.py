@@ -3877,7 +3877,9 @@ async def admin_get_site_users(search: str = "", _=Depends(_get_admin)):
     return {"ok": True, "users": [_row(r) for r in rows]}
 
 @app.patch("/api/admin/site-users/{user_id}")
-async def admin_update_site_user(user_id: int, body: dict, _=Depends(_get_admin)):
+async def admin_update_site_user(user_id: int, body: dict, cid: int = Depends(_get_admin_cid)):
+    if not await db.get_site_user_in_company(user_id, cid):
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
     first_name   = (body.get("first_name")   or "").strip() or None
     address      = (body.get("address")      or "").strip() or None
     car_plate    = (body.get("car_plate")    or "").strip().upper() or None
@@ -3893,7 +3895,9 @@ async def admin_update_site_user(user_id: int, body: dict, _=Depends(_get_admin)
     return {"ok": True}
 
 @app.post("/api/admin/site-users/{user_id}/reset-password")
-async def admin_reset_site_user_password(user_id: int, body: dict, _=Depends(_get_admin)):
+async def admin_reset_site_user_password(user_id: int, body: dict, cid: int = Depends(_get_admin_cid)):
+    if not await db.get_site_user_in_company(user_id, cid):
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
     new_password = (body.get("new_password") or "").strip()
     if len(new_password) < 4:
         raise HTTPException(status_code=400, detail="Пароль минимум 4 символа")
@@ -6122,9 +6126,9 @@ async def get_cash_channel(_=Depends(_get_admin)):
     return {"ok": True, "cash_tg_channel_id": ch}
 
 @app.put("/api/admin/settings/cash-channel")
-async def set_cash_channel(cash_tg_channel_id: str = Body(..., embed=True), _=Depends(_get_admin)):
+async def set_cash_channel(cash_tg_channel_id: str = Body(..., embed=True), cid: int = Depends(_get_admin_cid)):
     if not db.pool: raise HTTPException(503)
-    await _upsert_setting("cash_tg_channel_id", cash_tg_channel_id)
+    await _upsert_setting("cash_tg_channel_id", cash_tg_channel_id, cid)
     return {"ok": True}
 
 @app.get("/api/admin/settings/media-channel")
@@ -6133,20 +6137,21 @@ async def get_media_channel(_=Depends(_get_admin)):
     return {"ok": True, "media_channel_id": ch or MEDIA_CHANNEL_ID}
 
 @app.put("/api/admin/settings/media-channel")
-async def set_media_channel(media_channel_id: str = Body(..., embed=True), _=Depends(_get_admin)):
+async def set_media_channel(media_channel_id: str = Body(..., embed=True), cid: int = Depends(_get_admin_cid)):
     if not db.pool: raise HTTPException(503)
-    await _upsert_setting("media_channel_id", media_channel_id)
+    await _upsert_setting("media_channel_id", media_channel_id, cid)
     return {"ok": True}
 
-async def _upsert_setting(col: str, val: str):
-    """Обновить настройку — гарантирует наличие строки в settings."""
+async def _upsert_setting(col: str, val: str, company_id: int):
+    """Обновить настройку своей компании — гарантирует наличие строки в settings.
+    Раньше при отсутствующем company_id в WHERE это обновляло колонку у ВСЕХ компаний разом."""
     async with db.pool.acquire() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM settings")
+        count = await conn.fetchval("SELECT COUNT(*) FROM settings WHERE company_id=$1", company_id)
         if count == 0:
-            await conn.execute(f"INSERT INTO settings({col}) VALUES($1)", val)
+            await conn.execute(f"INSERT INTO settings({col}, company_id) VALUES($1,$2)", val, company_id)
         else:
-            await conn.execute(f"UPDATE settings SET {col}=$1", val)
-    logging.info(f"_upsert_setting {col}={repr(val)}")
+            await conn.execute(f"UPDATE settings SET {col}=$1 WHERE company_id=$2", val, company_id)
+    logging.info(f"_upsert_setting {col}={repr(val)} company_id={company_id}")
 
 
 @app.get("/api/admin/cash/my-balance")
