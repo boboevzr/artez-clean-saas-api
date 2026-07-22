@@ -135,6 +135,7 @@ async def create_tables():
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_channel_id   BIGINT       DEFAULT NULL;
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_admin_link   TEXT         DEFAULT NULL;
         ALTER TABLE companies ADD COLUMN IF NOT EXISTS tg_admin_id     BIGINT       DEFAULT NULL;
+        ALTER TABLE companies ADD COLUMN IF NOT EXISTS logo_url        TEXT         DEFAULT NULL;
         CREATE TABLE IF NOT EXISTS branches (
             id                   SERIAL PRIMARY KEY,
             company_id           INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -8154,22 +8155,27 @@ async def create_company(name: str, slug: str, secret_key: str,
         except Exception:
             return None  # slug уже занят
 
-async def update_company(company_id: int, updates: dict):
-    if not pool or not updates: return
+async def update_company(company_id: int, updates: dict) -> bool:
+    """Возвращает False только при конфликте уникального slug — остальные ошибки пробрасываются."""
+    if not pool or not updates: return True
     allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active", "timezone", "trial_days",
                "legal_name", "inn", "address", "contact_name", "contact_phone", "contact_email", "notes",
                "whatsapp", "instagram", "tg_group_link", "tg_group_id", "tg_channel_link", "tg_channel_id",
-               "tg_admin_link", "tg_admin_id"}
+               "tg_admin_link", "tg_admin_id", "logo_url"}
     fields = {k: v for k, v in updates.items() if k in allowed}
-    if not fields: return
+    if not fields: return True
     cols = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
     vals = list(fields.values())
     async with pool.acquire() as conn:
-        await conn.execute(
-            f"UPDATE companies SET {cols} WHERE id=$1", company_id, *vals
-        )
+        try:
+            await conn.execute(
+                f"UPDATE companies SET {cols} WHERE id=$1", company_id, *vals
+            )
+        except asyncpg.exceptions.UniqueViolationError:
+            return False
     if "timezone" in fields:
         invalidate_company_tz_cache(company_id)
+    return True
 
 async def delete_company(company_id: int):
     if not pool: return

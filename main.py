@@ -1,5 +1,6 @@
 ﻿import os
 import re
+import base64
 import secrets
 import logging
 import asyncio
@@ -10553,6 +10554,7 @@ async def company_info(staff=Depends(get_current_staff)):
         raise HTTPException(status_code=404, detail="Компания не найдена")
     return {
         "ok": True, "id": company["id"], "name": company["name"], "slug": company["slug"],
+        "logo_url":        company.get("logo_url"),
         "whatsapp":        company.get("whatsapp"),
         "instagram":       company.get("instagram"),
         "tg_group_link":   company.get("tg_group_link"),
@@ -10562,6 +10564,53 @@ async def company_info(staff=Depends(get_current_staff)):
         "tg_admin_link":   company.get("tg_admin_link"),
         "tg_admin_id":     company.get("tg_admin_id"),
     }
+
+
+SLUG_RE = re.compile(r"^[a-z0-9-]{3,50}$")
+
+class CompanyProfileRequest(BaseModel):
+    name: str | None = None
+    slug: str | None = None
+
+@app.put("/api/company/profile")
+async def company_update_profile(req: CompanyProfileRequest, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    updates = {}
+    if req.name is not None:
+        name = req.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Название не может быть пустым")
+        updates["name"] = name
+    if req.slug is not None:
+        slug = req.slug.strip().lower()
+        if not SLUG_RE.match(slug):
+            raise HTTPException(status_code=400, detail="Slug: только латиница, цифры и дефис, от 3 до 50 символов")
+        updates["slug"] = slug
+    if not updates:
+        return {"ok": True}
+    ok = await db.update_company(company_id, updates)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Этот slug уже занят другой компанией")
+    return {"ok": True, **updates}
+
+
+MAX_LOGO_BYTES = 400_000
+
+@app.post("/api/company/logo")
+async def company_upload_logo(file: UploadFile = File(...), staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть изображением")
+    data = await file.read()
+    if len(data) > MAX_LOGO_BYTES:
+        raise HTTPException(status_code=400, detail=f"Логотип слишком большой (макс. {MAX_LOGO_BYTES//1000} КБ)")
+    company_id = staff.get("company_id") or 1
+    logo_url = f"data:{file.content_type};base64,{base64.b64encode(data).decode('ascii')}"
+    await db.update_company(company_id, {"logo_url": logo_url})
+    return {"ok": True, "logo_url": logo_url}
 
 
 class CompanySocialRequest(BaseModel):
