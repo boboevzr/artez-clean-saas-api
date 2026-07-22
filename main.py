@@ -2559,6 +2559,20 @@ async def _get_admin(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Недействительный токен")
     return True
 
+async def _get_admin_cid(authorization: str = Header(None)) -> int:
+    """Как _get_admin, но возвращает company_id вызывающего — для запросов,
+    которым нужно ограничить действие своей компанией (см. #IDOR staff/permissions)."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("sub") != "admin" and payload.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Нет доступа")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+    return int(payload.get("company_id") or 1)
+
 async def _get_admin_or_staff_clients(authorization: str = Header(None)):
     """Принимает admin JWT или staff JWT с пермиссией clients."""
     if not authorization or not authorization.startswith("Bearer "):
@@ -6772,19 +6786,19 @@ async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_c
     return {"ok": True, "item": item}
 
 @app.patch("/api/admin/staff/{staff_id}/can-edit-items")
-async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin),
+async def admin_set_can_edit_items(staff_id: int, cid: int = Depends(_get_admin_cid),
                                     can_edit_items: bool = Body(..., embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "UPDATE staff SET can_edit_items=$2 WHERE id=$1 RETURNING id, can_edit_items",
-            staff_id, can_edit_items)
+            "UPDATE staff SET can_edit_items=$3 WHERE id=$1 AND company_id=$2 RETURNING id, can_edit_items",
+            staff_id, cid, can_edit_items)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
 
 @app.patch("/api/admin/staff/{staff_id}/permissions")
-async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
+async def admin_set_staff_permissions(staff_id: int, cid: int = Depends(_get_admin_cid),
     can_edit_items:       bool = Body(True,  embed=True),
     can_measure:          bool = Body(False, embed=True),
     can_approve_measure:  bool = Body(False, embed=True),
@@ -6811,7 +6825,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                    can_edit_confirmed=$9, can_send_pickup=$10, can_edit_delivery=$11,
                    can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14,
                    can_approve_debt=$15, can_drive=$16, can_view_timesheet=$17
-               WHERE id=$1
+               WHERE id=$1 AND company_id=$18
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_override_measure,
                          can_create_order, can_confirm_order, order_stages,
@@ -6823,7 +6837,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
             can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt,
-            can_drive, can_view_timesheet)
+            can_drive, can_view_timesheet, cid)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
