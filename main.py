@@ -9232,69 +9232,73 @@ async def adg_contacts_browse(
 # ── CallerID и IVR списки ──────────────────────────────────────────────────
 
 @app.get("/api/admin/autodial/callerids")
-async def ad_callerids(_=Depends(_get_admin)):
+async def ad_callerids(cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM autodial_callerids ORDER BY (regexp_replace(number,'[^0-9]','','g'))::bigint ASC, id")
+        rows = await conn.fetch(
+            "SELECT * FROM autodial_callerids WHERE company_id=$1 "
+            "ORDER BY (regexp_replace(number,'[^0-9]','','g'))::bigint ASC, id", cid)
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/autodial/callerids")
-async def ad_callerid_create(body: dict = Body(...), _=Depends(_get_admin)):
+async def ad_callerid_create(body: dict = Body(...), cid: int = Depends(_get_admin_cid)):
     num = (body.get("number") or "").strip()
     if not num: raise HTTPException(400, "number required")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO autodial_callerids (number,label,sort_order) VALUES ($1,$2,$3) RETURNING *",
-            num, (body.get("label") or "").strip(), body.get("sort_order") or 0
+            "INSERT INTO autodial_callerids (number,label,sort_order,company_id) VALUES ($1,$2,$3,$4) RETURNING *",
+            num, (body.get("label") or "").strip(), body.get("sort_order") or 0, cid
         )
     return dict(row)
 
 @app.put("/api/admin/autodial/callerids/{cid}")
-async def ad_callerid_update(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
+async def ad_callerid_update(cid: int, body: dict = Body(...), ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
         await conn.execute(
-            "UPDATE autodial_callerids SET number=$1,label=$2,sort_order=$3 WHERE id=$4",
+            "UPDATE autodial_callerids SET number=$1,label=$2,sort_order=$3 WHERE id=$4 AND company_id=$5",
             (body.get("number") or "").strip(), (body.get("label") or "").strip(),
-            body.get("sort_order") or 0, cid
+            body.get("sort_order") or 0, cid, ccid
         )
     return {"ok": True}
 
 @app.delete("/api/admin/autodial/callerids/{cid}")
-async def ad_callerid_delete(cid: int, _=Depends(_get_admin)):
+async def ad_callerid_delete(cid: int, ccid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        await conn.execute("DELETE FROM autodial_callerids WHERE id=$1", cid)
+        await conn.execute("DELETE FROM autodial_callerids WHERE id=$1 AND company_id=$2", cid, ccid)
     return {"ok": True}
 
 @app.get("/api/admin/autodial/ivrs")
-async def ad_ivrs(_=Depends(_get_admin)):
+async def ad_ivrs(cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM autodial_ivrs ORDER BY ivr_group, (regexp_replace(exten,'[^0-9]','','g'))::bigint ASC, id")
+        rows = await conn.fetch(
+            "SELECT * FROM autodial_ivrs WHERE company_id=$1 "
+            "ORDER BY ivr_group, (regexp_replace(exten,'[^0-9]','','g'))::bigint ASC, id", cid)
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/autodial/ivrs")
-async def ad_ivr_create(body: dict = Body(...), _=Depends(_get_admin)):
+async def ad_ivr_create(body: dict = Body(...), cid: int = Depends(_get_admin_cid)):
     exten = (body.get("exten") or "").strip()
     if not exten: raise HTTPException(400, "exten required")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO autodial_ivrs (exten,label,ivr_group) VALUES ($1,$2,$3) RETURNING *",
-            exten, (body.get("label") or "").strip(), (body.get("ivr_group") or "promo").strip()
+            "INSERT INTO autodial_ivrs (exten,label,ivr_group,company_id) VALUES ($1,$2,$3,$4) RETURNING *",
+            exten, (body.get("label") or "").strip(), (body.get("ivr_group") or "promo").strip(), cid
         )
     return dict(row)
 
 @app.put("/api/admin/autodial/ivrs/{iid}")
-async def ad_ivr_update(iid: int, body: dict = Body(...), _=Depends(_get_admin)):
+async def ad_ivr_update(iid: int, body: dict = Body(...), cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
         await conn.execute(
-            "UPDATE autodial_ivrs SET exten=$1,label=$2,ivr_group=$3 WHERE id=$4",
+            "UPDATE autodial_ivrs SET exten=$1,label=$2,ivr_group=$3 WHERE id=$4 AND company_id=$5",
             (body.get("exten") or "").strip(), (body.get("label") or "").strip(),
-            (body.get("ivr_group") or "promo").strip(), iid
+            (body.get("ivr_group") or "promo").strip(), iid, cid
         )
     return {"ok": True}
 
 @app.delete("/api/admin/autodial/ivrs/{iid}")
-async def ad_ivr_delete(iid: int, _=Depends(_get_admin)):
+async def ad_ivr_delete(iid: int, cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        await conn.execute("DELETE FROM autodial_ivrs WHERE id=$1", iid)
+        await conn.execute("DELETE FROM autodial_ivrs WHERE id=$1 AND company_id=$2", iid, cid)
     return {"ok": True}
 
 
