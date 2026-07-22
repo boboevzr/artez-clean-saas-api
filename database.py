@@ -3819,16 +3819,17 @@ async def get_leads(status: str = None, branch: str = None,
 
 async def update_lead_status(lead_id: int, status: str, scheduled_at=None):
     if not pool: return
+    cid = _cid()
     async with pool.acquire() as conn:
         if status == "callback" and scheduled_at:
             await conn.execute(
-                "UPDATE leads SET status=$2, callback_at=$3, updated_at=NOW() WHERE id=$1",
-                lead_id, status, scheduled_at
+                "UPDATE leads SET status=$2, callback_at=$3, updated_at=NOW() WHERE id=$1 AND company_id=$4",
+                lead_id, status, scheduled_at, cid
             )
         else:
             await conn.execute(
-                "UPDATE leads SET status=$2, callback_at=NULL, updated_at=NOW() WHERE id=$1",
-                lead_id, status
+                "UPDATE leads SET status=$2, callback_at=NULL, updated_at=NOW() WHERE id=$1 AND company_id=$3",
+                lead_id, status, cid
             )
 
 async def update_lead(lead_id: int, **kwargs) -> dict | None:
@@ -3849,11 +3850,13 @@ async def delete_lead(lead_id: int) -> bool:
     if not pool: return False
     cid = _cid()
     async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM leads WHERE id=$1 AND company_id=$2", lead_id, cid)
+        if res != "DELETE 1":
+            return False
         await conn.execute("DELETE FROM agent_notifications WHERE lead_id=$1", lead_id)
         await conn.execute("DELETE FROM lead_reminders       WHERE lead_id=$1", lead_id)
         await conn.execute("DELETE FROM lead_calls           WHERE lead_id=$1", lead_id)
-        res = await conn.execute("DELETE FROM leads WHERE id=$1 AND company_id=$2", lead_id, cid)
-        return res == "DELETE 1"
+        return True
 
 async def get_leads_by_agent(agent_id: int, status: str = None):
     if not pool: return []
@@ -4443,12 +4446,14 @@ async def update_contact(contact_id: int, **kwargs) -> dict | None:
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return None
+    cid = _cid()
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
     vals = list(fields.values())
+    cid_param = len(fields) + 2
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE contacts SET {set_parts}, updated_at=NOW() WHERE id=$1 RETURNING *",
-            contact_id, *vals)
+            f"UPDATE contacts SET {set_parts}, updated_at=NOW() WHERE id=$1 AND company_id=${cid_param} RETURNING *",
+            contact_id, *vals, cid)
         return dict(row) if row else None
 
 
@@ -4463,8 +4468,9 @@ async def delete_crm_client(client_id: int) -> bool:
 async def delete_contact(contact_id: int) -> bool:
     if not pool:
         return False
+    cid = _cid()
     async with pool.acquire() as conn:
-        res = await conn.execute("DELETE FROM contacts WHERE id=$1", contact_id)
+        res = await conn.execute("DELETE FROM contacts WHERE id=$1 AND company_id=$2", contact_id, cid)
         return res == "DELETE 1"
 
 

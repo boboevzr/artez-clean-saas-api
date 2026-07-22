@@ -2837,9 +2837,9 @@ async def contacts_bulk(req: ContactsBulkRequest, _=Depends(_get_admin)):
 async def contacts_export(
     search: str = "", source: str = "",
     has_phone2: bool = False, has_address: bool = False, valid_phone: bool = False,
-    _=Depends(_get_admin)
+    cid: int = Depends(_get_admin_cid)
 ):
-    """Экспорт контактов без лимита с фильтрами."""
+    """Экспорт контактов своей компании без лимита с фильтрами."""
     async with db.pool.acquire() as conn:
         conditions = ["1=1"]
         params: list = []
@@ -2858,23 +2858,24 @@ async def contacts_export(
             conditions.append("(address IS NOT NULL AND address != '' OR short_address IS NOT NULL AND short_address != '')")
         if valid_phone:
             conditions.append("length(regexp_replace(regexp_replace(phone,'[^0-9]','','g'),'^998','')) >= 9")
+        conditions.append(f"company_id = ${i}"); params.append(cid); i += 1
         sql = f"SELECT * FROM contacts WHERE {' AND '.join(conditions)} ORDER BY id DESC"
         rows = await conn.fetch(sql, *params)
     return {"ok": True, "contacts": [dict(r) for r in rows], "total": len(rows)}
 
 
 @app.get("/api/contacts/duplicates")
-async def contacts_duplicates(_=Depends(_get_admin)):
-    """Анализ дублирующих телефонных номеров в справочнике."""
+async def contacts_duplicates(cid: int = Depends(_get_admin_cid)):
+    """Анализ дублирующих телефонных номеров в справочнике своей компании."""
     async with db.pool.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM contacts")
+        total = await conn.fetchval("SELECT COUNT(*) FROM contacts WHERE company_id=$1", cid)
 
         # Одинаковые номера (разные форматы записи)
         format_dups = await conn.fetch("""
             WITH n AS (
                 SELECT id, phone, first_name, last_name,
                        regexp_replace(regexp_replace(phone, '[^0-9]', '', 'g'), '^998', '') AS norm
-                FROM contacts WHERE phone IS NOT NULL AND phone != ''
+                FROM contacts WHERE phone IS NOT NULL AND phone != '' AND company_id=$1
             )
             SELECT norm, COUNT(*) AS cnt,
                    array_agg(id    ORDER BY id) AS ids,
@@ -2883,7 +2884,7 @@ async def contacts_duplicates(_=Depends(_get_admin)):
             FROM n WHERE length(norm) >= 7
             GROUP BY norm HAVING COUNT(*) > 1
             ORDER BY cnt DESC, norm
-        """)
+        """, cid)
 
         # Основной номер одного контакта = доп. номер другого
         phone2_cross = await conn.fetch("""
@@ -2896,18 +2897,19 @@ async def contacts_duplicates(_=Depends(_get_admin)):
               ON regexp_replace(regexp_replace(c1.phone,'[^0-9]','','g'),'^998','')
                = regexp_replace(regexp_replace(c2.phone2,'[^0-9]','','g'),'^998','')
             WHERE c1.id != c2.id AND c2.phone2 IS NOT NULL AND c2.phone2 != ''
+              AND c1.company_id=$1 AND c2.company_id=$1
             ORDER BY c1.phone, c1.id
-        """)
+        """, cid)
 
         # Короткие / некорректные номера (< 7 цифр после нормализации)
         short_phones = await conn.fetch("""
             SELECT id, phone, trim(coalesce(first_name,'')||' '||coalesce(last_name,'')) AS name,
                    length(regexp_replace(regexp_replace(phone,'[^0-9]','','g'),'^998','')) AS norm_len
             FROM contacts
-            WHERE phone IS NOT NULL AND phone != ''
+            WHERE phone IS NOT NULL AND phone != '' AND company_id=$1
               AND length(regexp_replace(regexp_replace(phone,'[^0-9]','','g'),'^998','')) < 7
             ORDER BY norm_len, phone
-        """)
+        """, cid)
 
     return {
         "ok": True,
@@ -2930,9 +2932,9 @@ async def contacts_duplicates(_=Depends(_get_admin)):
 
 
 @app.get("/api/contacts/{contact_id}")
-async def contact_get(contact_id: int, _=Depends(_get_admin)):
+async def contact_get(contact_id: int, cid: int = Depends(_get_admin_cid)):
     async with db.pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM contacts WHERE id=$1", contact_id)
+        row = await conn.fetchrow("SELECT * FROM contacts WHERE id=$1 AND company_id=$2", contact_id, cid)
     if not row:
         raise HTTPException(status_code=404, detail="Контакт не найден")
     return {"ok": True, "contact": dict(row)}
