@@ -5605,8 +5605,12 @@ async def get_my_cash_balance(staff_id: int) -> dict:
 async def get_cash_balance() -> list:
     """Баланс наличных по всем сотрудникам (два уровня: исполнители + ответственные)."""
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT id, first_name, last_name, can_manage_cash, role FROM staff WHERE active=TRUE ORDER BY (role='admin') DESC, can_manage_cash DESC, last_name, first_name")
+        rows = await conn.fetch(
+            "SELECT id, first_name, last_name, can_manage_cash, role FROM staff "
+            "WHERE active=TRUE AND company_id=$1 ORDER BY (role='admin') DESC, can_manage_cash DESC, last_name, first_name",
+            cid)
         result = []
         for s in rows:
             bal = await get_my_cash_balance(s['id'])
@@ -5796,6 +5800,7 @@ async def get_bank_deposits(limit: int = 100) -> list:
 async def get_cash_dashboard() -> dict:
     """Сводные метрики для дашборда кассы."""
     if not pool: return {}
+    cid = _cid()
     balances = await get_cash_balance()
     staff_on_hand   = sum(float(b.get('on_hand', 0)) for b in balances if b.get('role') != 'admin' and not b.get('can_manage_cash'))
     manager_on_hand = sum(float(b.get('on_hand', 0)) for b in balances if b.get('role') != 'admin' and b.get('can_manage_cash'))
@@ -5804,9 +5809,11 @@ async def get_cash_dashboard() -> dict:
     today = _date.today()
     async with pool.acquire() as conn:
         r1 = await conn.fetchrow(
-            "SELECT COALESCE(SUM(amount),0) AS total FROM cash_handovers WHERE to_type IN ('bank','safe') AND created_at::date=$1", today)
+            "SELECT COALESCE(SUM(amount),0) AS total FROM cash_handovers "
+            "WHERE to_type IN ('bank','safe') AND created_at::date=$1 AND company_id=$2", today, cid)
         r3 = await conn.fetchrow(
-            "SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS cnt FROM expenses WHERE status IN ('pending','mgr_approved')")
+            "SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS cnt FROM expenses "
+            "WHERE status IN ('pending','mgr_approved') AND company_id=$1", cid)
         # К оплате: все заказы в работе (не доставлены), у которых есть остаток
         r_pending = await conn.fetchrow("""
             SELECT COALESCE(SUM(GREATEST(0,
@@ -5822,7 +5829,8 @@ async def get_cash_dashboard() -> dict:
             FROM orders o
             WHERE o.payment_status IN ('unpaid','partial')
               AND o.status IN ('ready','delivery')
-        """)
+              AND o.company_id=$1
+        """, cid)
         # Долги: доставленные с debt_responsible_id, ещё не оплачены полностью
         r_debt = await conn.fetchrow("""
             SELECT
@@ -5841,7 +5849,8 @@ async def get_cash_dashboard() -> dict:
             FROM orders o
             WHERE o.debt_responsible_id IS NOT NULL
               AND o.payment_status IN ('unpaid','partial')
-        """)
+              AND o.company_id=$1
+        """, cid)
     return {
         'staff_on_hand':          staff_on_hand,
         'manager_on_hand':        manager_on_hand,
@@ -7376,10 +7385,13 @@ async def save_advance_max_percent(pct: float) -> None:
 async def get_salary_balance(staff_id: int) -> dict:
     """Баланс сотрудника: общий остаток, разбивка за текущий месяц, лимит аванса."""
     if not pool: return {}
+    cid = _cid()
     from datetime import date as _date
     today = _date.today()
     period = _date(today.year, today.month, 1)
     async with pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT id FROM staff WHERE id=$1 AND company_id=$2", staff_id, cid):
+            return {}
         # Общий накопленный баланс
         total = await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM salary_ledger WHERE staff_id=$1", staff_id)
@@ -7392,13 +7404,13 @@ async def get_salary_balance(staff_id: int) -> dict:
         month_map = {r['type']: float(r['s']) for r in month_rows}
         accrual_month   = month_map.get('accrual', 0)
         advances_month  = abs(month_map.get('advance', 0))
-        # advance_percent: личный или глобальный
+        # advance_percent: личный или глобальный (settings — своя компания, не случайная строка)
         pct_row = await conn.fetchrow("""
             SELECT s.advance_percent, st.advance_max_percent
             FROM staff s, settings st
-            WHERE s.id=$1
+            WHERE s.id=$1 AND st.company_id=$2
             LIMIT 1
-        """, staff_id)
+        """, staff_id, cid)
         pct = float(pct_row['advance_percent'] or pct_row['advance_max_percent'] or 50)
         advance_limit = max(0.0, accrual_month * pct / 100 - advances_month)
         return {
@@ -7433,6 +7445,8 @@ async def add_salary_ledger_entry(staff_id: int, period_str: str, type_: str,
     from datetime import date as _date
     period = _date.fromisoformat(period_str)
     async with pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT id FROM staff WHERE id=$1 AND company_id=$2", staff_id, cid):
+            return {}
         row = await conn.fetchrow("""
             INSERT INTO salary_ledger (staff_id, period, type, amount, note, expense_id, created_by, fine_reason, company_id)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
@@ -7442,6 +7456,7 @@ async def add_salary_ledger_entry(staff_id: int, period_str: str, type_: str,
 async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> dict:
     """Посуточный регистр: начисление считается из табеля, авансы/штрафы из ledger."""
     if not pool: return {}
+    cid = _cid()
     from datetime import date as _date
     import calendar as _cal
     period = _date(year, month, 1)
@@ -7450,6 +7465,11 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
     period_end = _date(next_y, next_m, 1)
 
     async with pool.acquire() as conn:
+        # Сотрудник должен принадлежать компании вызывающего — иначе всё дальше
+        # (ledger/timesheet/проценты) читается по чужому staff_id (IDOR).
+        if not await conn.fetchrow("SELECT id FROM staff WHERE id=$1 AND company_id=$2", staff_id, cid):
+            return {}
+
         # Накопленный баланс ДО этого месяца (все типы, все периоды < текущего)
         opening_balance = float(await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM salary_ledger WHERE staff_id=$1 AND period < $2",
@@ -7852,9 +7872,12 @@ async def set_opening_balance(staff_id: int, year: int, month: int,
                                target: float, created_by: int) -> dict:
     """Устанавливает остаток на начало месяца через корректирующую запись в предыдущем периоде."""
     if not pool: return {}
+    cid = _cid()
     from datetime import date as _date
     period = _date(year, month, 1)
     async with pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT id FROM staff WHERE id=$1 AND company_id=$2", staff_id, cid):
+            return {}
         current = float(await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM salary_ledger WHERE staff_id=$1 AND period < $2",
             staff_id, period) or 0)
@@ -7866,64 +7889,79 @@ async def set_opening_balance(staff_id: int, year: int, month: int,
         prev_year  = year if month > 1 else year - 1
         prev_period = _date(prev_year, prev_month, 1)
         row = await conn.fetchrow("""
-            INSERT INTO salary_ledger (staff_id, period, type, amount, note, created_by)
-            VALUES ($1,$2,'adjustment',$3,'Ручная корректировка входящего остатка',$4)
+            INSERT INTO salary_ledger (staff_id, period, type, amount, note, created_by, company_id)
+            VALUES ($1,$2,'adjustment',$3,'Ручная корректировка входящего остатка',$4,$5)
             RETURNING id
-        """, staff_id, prev_period, diff, created_by)
+        """, staff_id, prev_period, diff, created_by, cid)
         return {'ok': True, 'diff': diff, 'entry_id': row['id'] if row else None}
 
 async def delete_month_accruals(staff_id: int, year: int, month: int) -> int:
     """Удаляет все записи типа 'accrual' за указанный период для сотрудника."""
     if not pool: return 0
+    cid = _cid()
     from datetime import date as _date
     period = _date(year, month, 1)
     async with pool.acquire() as conn:
         result = await conn.execute(
-            "DELETE FROM salary_ledger WHERE staff_id=$1 AND period=$2 AND type='accrual'",
-            staff_id, period)
+            "DELETE FROM salary_ledger WHERE staff_id=$1 AND period=$2 AND type='accrual' AND company_id=$3",
+            staff_id, period, cid)
         return int(result.split()[-1])
 
 async def update_salary_ledger_entry(entry_id: int, amount: float, note: str) -> dict:
     if not pool: return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            UPDATE salary_ledger SET amount=$2, note=$3 WHERE id=$1 RETURNING *
-        """, entry_id, amount, note)
+            UPDATE salary_ledger SET amount=$2, note=$3 WHERE id=$1 AND company_id=$4 RETURNING *
+        """, entry_id, amount, note, cid)
         return dict(row) if row else {}
 
 async def delete_salary_ledger_entry(entry_id: int) -> bool:
     if not pool: return False
+    cid = _cid()
     async with pool.acquire() as conn:
-        r = await conn.execute("DELETE FROM salary_ledger WHERE id=$1", entry_id)
+        r = await conn.execute("DELETE FROM salary_ledger WHERE id=$1 AND company_id=$2", entry_id, cid)
         return r == "DELETE 1"
 
-async def auto_accrue_monthly_salaries() -> int:
-    """Начисляет оклады 1-го числа месяца. Пропускает если уже есть accrual за период."""
+async def _accrue_monthly_salaries_for_company(conn, company_id: int, period) -> int:
+    staff_rows = await conn.fetch("""
+        SELECT id, salary_type, salary_rate
+        FROM staff
+        WHERE (active = TRUE OR active IS NULL)
+          AND role <> 'agent'
+          AND salary_type IS NOT NULL AND salary_rate > 0
+          AND company_id=$1
+    """, company_id)
+    count = 0
+    for s in staff_rows:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM salary_ledger WHERE staff_id=$1 AND period=$2 AND type='accrual'",
+            s['id'], period)
+        if exists:
+            continue
+        await conn.execute("""
+            INSERT INTO salary_ledger (staff_id, period, type, amount, note, company_id)
+            VALUES ($1, $2, 'accrual', $3, 'Автоначисление оклада', $4)
+        """, s['id'], period, float(s['salary_rate'] or 0), company_id)
+        count += 1
+    return count
+
+async def auto_accrue_monthly_salaries(company_id: int | None = None) -> int:
+    """Начисляет оклады 1-го числа месяца. Пропускает если уже есть accrual за период.
+    company_id=None (используется фоновым воркером раз в месяц) — по всем компаниям;
+    иначе (ручной вызов админом) — только по своей компании."""
     if not pool: return 0
     from datetime import date as _date
     today = _date.today()
     period = _date(today.year, today.month, 1)
     async with pool.acquire() as conn:
-        staff_rows = await conn.fetch("""
-            SELECT id, salary_type, salary_rate
-            FROM staff
-            WHERE (active = TRUE OR active IS NULL)
-              AND role <> 'agent'
-              AND salary_type IS NOT NULL AND salary_rate > 0
-        """)
-        count = 0
-        for s in staff_rows:
-            exists = await conn.fetchval(
-                "SELECT 1 FROM salary_ledger WHERE staff_id=$1 AND period=$2 AND type='accrual'",
-                s['id'], period)
-            if exists:
-                continue
-            await conn.execute("""
-                INSERT INTO salary_ledger (staff_id, period, type, amount, note)
-                VALUES ($1, $2, 'accrual', $3, 'Автоначисление оклада')
-            """, s['id'], period, float(s['salary_rate'] or 0))
-            count += 1
-        return count
+        if company_id is not None:
+            return await _accrue_monthly_salaries_for_company(conn, company_id, period)
+        total = 0
+        companies = await conn.fetch("SELECT id FROM companies WHERE id > 0")
+        for c in companies:
+            total += await _accrue_monthly_salaries_for_company(conn, c['id'], period)
+        return total
 
 async def _create_ledger_for_expense(conn, expense: dict) -> None:
     """Создаёт запись salary_ledger при утверждении расхода на сотрудника."""

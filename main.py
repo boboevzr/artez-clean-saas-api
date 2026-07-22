@@ -5396,8 +5396,8 @@ async def reject_safe_deposit(deposit_id: int, staff=Depends(get_current_staff))
 
 
 @app.delete("/api/admin/cash/handovers/{handover_id}")
-async def admin_cancel_handover(handover_id: int, staff=Depends(_get_admin)):
-    row = await db.cancel_cash_handover(handover_id, staff["id"], is_admin=True)
+async def admin_cancel_handover(handover_id: int, _cid: int = Depends(_get_admin_cid)):
+    row = await db.cancel_cash_handover(handover_id, None, is_admin=True)
     if not row:
         raise HTTPException(status_code=404, detail="Не найдено")
     return {"ok": True}
@@ -6034,21 +6034,22 @@ class _TempDeleteBody(BaseModel):
     ids: list[int]
 
 @app.get("/api/admin/temp/orphan-counts")
-async def temp_orphan_counts(_=Depends(_get_admin)):
+async def temp_orphan_counts(cid: int = Depends(_get_admin_cid)):
     if not db.pool: raise HTTPException(503)
     result = {}
     async with db.pool.acquire() as conn:
         for tbl in _TEMP_TABLES:
             result[tbl] = int(await conn.fetchval(
-                f"SELECT COUNT(*) FROM {tbl} t LEFT JOIN orders o ON o.id=t.order_id WHERE o.id IS NULL"
+                f"SELECT COUNT(*) FROM {tbl} t LEFT JOIN orders o ON o.id=t.order_id "
+                f"WHERE o.id IS NULL AND t.company_id=$1", cid
             ))
     return result
 
 @app.get("/api/admin/temp/records/{table}")
-async def temp_get_records(table: str, orphans_only: bool = True, _=Depends(_get_admin)):
+async def temp_get_records(table: str, orphans_only: bool = True, cid: int = Depends(_get_admin_cid)):
     if table not in _TEMP_TABLES: raise HTTPException(404, "Unknown table")
     if not db.pool: raise HTTPException(503)
-    where = "WHERE o.id IS NULL" if orphans_only else ""
+    where = "WHERE o.id IS NULL AND t.company_id=$1" if orphans_only else "WHERE t.company_id=$1"
     async with db.pool.acquire() as conn:
         rows = await conn.fetch(f"""
             SELECT t.*, (o.id IS NULL) AS is_orphan
@@ -6056,16 +6057,17 @@ async def temp_get_records(table: str, orphans_only: bool = True, _=Depends(_get
             LEFT JOIN orders o ON o.id = t.order_id
             {where}
             ORDER BY t.id DESC LIMIT 1000
-        """)
+        """, cid)
     return {"rows": [dict(r) for r in rows], "table": table, "label": _TEMP_TABLES[table]}
 
 @app.delete("/api/admin/temp/records/{table}")
-async def temp_delete_records(table: str, body: _TempDeleteBody, _=Depends(_get_admin)):
+async def temp_delete_records(table: str, body: _TempDeleteBody, cid: int = Depends(_get_admin_cid)):
     if table not in _TEMP_TABLES: raise HTTPException(404, "Unknown table")
     if not body.ids: return {"ok": True, "deleted": 0}
     if not db.pool: raise HTTPException(503)
     async with db.pool.acquire() as conn:
-        result = await conn.execute(f"DELETE FROM {table} WHERE id = ANY($1::int[])", body.ids)
+        result = await conn.execute(
+            f"DELETE FROM {table} WHERE id = ANY($1::int[]) AND company_id=$2", body.ids, cid)
     deleted = int(result.split()[-1]) if result else 0
     return {"ok": True, "deleted": deleted}
 
@@ -6076,7 +6078,7 @@ class _ChatHistoryDeleteBody(BaseModel):
     date_to:   str   # YYYY-MM-DD
 
 @app.get("/api/admin/chat/history/stats")
-async def chat_history_stats(date_from: str, date_to: str, _=Depends(_get_admin)):
+async def chat_history_stats(date_from: str, date_to: str, cid: int = Depends(_get_admin_cid)):
     if not db.pool: raise HTTPException(503)
     try:
         df = datetime.strptime(date_from, "%Y-%m-%d").date()
@@ -6085,19 +6087,19 @@ async def chat_history_stats(date_from: str, date_to: str, _=Depends(_get_admin)
         raise HTTPException(400, "date_from / date_to must be YYYY-MM-DD")
     async with db.pool.acquire() as conn:
         sessions = int(await conn.fetchval(
-            "SELECT COUNT(*) FROM chat_sessions WHERE status='closed' AND created_at::date BETWEEN $1 AND $2",
-            df, dt
+            "SELECT COUNT(*) FROM chat_sessions WHERE status='closed' AND created_at::date BETWEEN $1 AND $2 AND company_id=$3",
+            df, dt, cid
         ))
         messages = int(await conn.fetchval(
             """SELECT COUNT(*) FROM chat_messages cm
                JOIN chat_sessions cs ON cs.id = cm.session_id
-               WHERE cs.status='closed' AND cs.created_at::date BETWEEN $1 AND $2""",
-            df, dt
+               WHERE cs.status='closed' AND cs.created_at::date BETWEEN $1 AND $2 AND cs.company_id=$3""",
+            df, dt, cid
         ))
     return {"ok": True, "sessions": sessions, "messages": messages, "date_from": date_from, "date_to": date_to}
 
 @app.delete("/api/admin/chat/history")
-async def chat_history_delete(body: _ChatHistoryDeleteBody, _=Depends(_get_admin)):
+async def chat_history_delete(body: _ChatHistoryDeleteBody, cid: int = Depends(_get_admin_cid)):
     if not db.pool: raise HTTPException(503)
     try:
         df = datetime.strptime(body.date_from, "%Y-%m-%d").date()
@@ -6106,8 +6108,8 @@ async def chat_history_delete(body: _ChatHistoryDeleteBody, _=Depends(_get_admin
         raise HTTPException(400, "date_from / date_to must be YYYY-MM-DD")
     async with db.pool.acquire() as conn:
         result = await conn.execute(
-            "DELETE FROM chat_sessions WHERE status='closed' AND created_at::date BETWEEN $1 AND $2",
-            df, dt
+            "DELETE FROM chat_sessions WHERE status='closed' AND created_at::date BETWEEN $1 AND $2 AND company_id=$3",
+            df, dt, cid
         )
     deleted = int(result.split()[-1]) if result else 0
     return {"ok": True, "deleted_sessions": deleted}
@@ -6957,8 +6959,8 @@ async def save_advance_pct(body: dict = Body(...), _=Depends(_get_admin)):
     return {"ok": True}
 
 @app.post("/api/admin/salary/accrue")
-async def manual_accrue(_=Depends(_get_admin)):
-    count = await db.auto_accrue_monthly_salaries()
+async def manual_accrue(cid: int = Depends(_get_admin_cid)):
+    count = await db.auto_accrue_monthly_salaries(company_id=cid)
     return {"ok": True, "count": count}
 
 # ── discount requests ──────────────────────────────────────────────────────────
@@ -8096,14 +8098,17 @@ async def _notify_group_site_lead(lead_code: str, data: "OrderRequest", lead_id:
 
 # ── ОБСЛУЖИВАНИЕ БД ──────────────────────────────────────────────────────────
 @app.post("/api/admin/db-maintenance")
-async def db_maintenance(op: str = Body(..., embed=True), _=Depends(_get_admin)):
+async def db_maintenance(op: str = Body(..., embed=True), cid: int = Depends(_get_admin_cid)):
     if not db.pool:
         raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         if op == "purge_deleted_leads_data":
-            r1 = await conn.execute("DELETE FROM agent_notifications WHERE lead_id NOT IN (SELECT id FROM leads)")
-            r2 = await conn.execute("DELETE FROM lead_reminders       WHERE lead_id NOT IN (SELECT id FROM leads)")
-            r3 = await conn.execute("DELETE FROM lead_calls           WHERE lead_id NOT IN (SELECT id FROM leads)")
+            r1 = await conn.execute(
+                "DELETE FROM agent_notifications WHERE lead_id NOT IN (SELECT id FROM leads) AND company_id=$1", cid)
+            r2 = await conn.execute(
+                "DELETE FROM lead_reminders       WHERE lead_id NOT IN (SELECT id FROM leads) AND company_id=$1", cid)
+            r3 = await conn.execute(
+                "DELETE FROM lead_calls           WHERE lead_id NOT IN (SELECT id FROM leads) AND company_id=$1", cid)
             total = sum(int(r.split()[-1]) for r in [r1, r2, r3] if r)
             return {"ok": True, "message": f"Удалено {total} записей (уведомления: {r1.split()[-1]}, напоминания: {r2.split()[-1]}, журнал: {r3.split()[-1]})"}
 
@@ -8113,26 +8118,32 @@ async def db_maintenance(op: str = Body(..., embed=True), _=Depends(_get_admin))
                 WHERE order_num NOT IN (
                     SELECT order_num FROM orders WHERE order_num IS NOT NULL
                 )
-            """)
+                AND order_num IN (SELECT order_num FROM orders WHERE company_id=$1)
+            """, cid)
             count = result.split()[-1] if result else "0"
             return {"ok": True, "message": f"Удалено {count} записей истории удалённых заказов"}
 
         elif op == "truncate_history":
-            await conn.execute("TRUNCATE TABLE order_status_history")
-            return {"ok": True, "message": "Таблица order_status_history очищена"}
+            # order_status_history не имеет своей колонки company_id (ключ — order_num),
+            # TRUNCATE стирал бы историю ВСЕХ компаний разом — заменено на DELETE по своим заказам.
+            result = await conn.execute(
+                "DELETE FROM order_status_history WHERE order_num IN (SELECT order_num FROM orders WHERE company_id=$1)",
+                cid)
+            count = result.split()[-1] if result else "0"
+            return {"ok": True, "message": f"Удалено {count} записей истории (своей компании)"}
 
         elif op == "vacuum":
-            await conn.execute("VACUUM ANALYZE orders")
-            await conn.execute("VACUUM ANALYZE order_items")
-            await conn.execute("VACUUM ANALYZE order_status_history")
-            return {"ok": True, "message": "VACUUM ANALYZE выполнен для orders, order_items, order_status_history"}
+            # VACUUM — физическая операция над всей таблицей, не может быть ограничена одной
+            # компанией. Недоступно тенантскому админу — это платформенная операция.
+            raise HTTPException(status_code=403, detail="VACUUM недоступен для админа компании — обратитесь в поддержку платформы")
 
         elif op == "purge_old_leads":
             result = await conn.execute("""
                 DELETE FROM leads
                 WHERE status IN ('closed','cancelled')
                   AND created_at < NOW() - INTERVAL '90 days'
-            """)
+                  AND company_id=$1
+            """, cid)
             count = result.split()[-1] if result else "0"
             return {"ok": True, "message": f"Удалено {count} старых лидов"}
 
