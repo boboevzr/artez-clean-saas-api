@@ -8131,7 +8131,7 @@ async def get_all_companies():
     async with pool.acquire() as conn:
         return await conn.fetch(
             "SELECT id, name, slug, plan, max_branches, max_staff, active, created_at, "
-            "contact_name, contact_phone, contact_email, inn, legal_name, address, notes "
+            "contact_name, contact_phone, contact_email, inn, legal_name, address, notes, logo_url "
             "FROM companies WHERE id > 0 ORDER BY id"
         )
 

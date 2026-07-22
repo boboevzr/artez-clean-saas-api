@@ -10543,7 +10543,7 @@ async def company_resolve(slug: str):
     company = await db.get_company(company_id)
     if not company or not company.get("active"):
         raise HTTPException(status_code=404, detail="Компания не найдена или отключена")
-    return {"name": company["name"], "slug": company["slug"]}
+    return {"name": company["name"], "slug": company["slug"], "logo_url": company.get("logo_url")}
 
 
 @app.get("/api/company/info")
