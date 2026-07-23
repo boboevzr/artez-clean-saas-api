@@ -8592,6 +8592,38 @@ async def update_saas_subscription(sub_id: int, updates: dict):
         )
 
 
+async def checkout_plan_test(company_id: int, plan_id: int, months: int) -> dict | None:
+    """ТЕСТОВЫЙ режим оплаты (нет платёжного шлюза) — сразу применяет план к компании:
+    создаёт подписку + запись оплаты и обновляет companies.plan/max_branches/max_staff."""
+    if not pool: return None
+    from datetime import date, timedelta
+    months = max(1, min(12, months))
+    async with pool.acquire() as conn:
+        plan = await conn.fetchrow("SELECT * FROM saas_plans WHERE id=$1 AND active=TRUE", plan_id)
+        if not plan:
+            return None
+        price_row = await conn.fetchrow(
+            "SELECT price FROM saas_plan_pricing WHERE plan_id=$1 AND month=$2", plan_id, months)
+        amount = price_row["price"] if price_row else plan["base_price"] * months
+        start = date.today()
+        end = start + timedelta(days=30 * months)
+        async with conn.transaction():
+            sub = await conn.fetchrow("""
+                INSERT INTO saas_subscriptions (company_id, plan_id, start_date, end_date, status, notes)
+                VALUES ($1, $2, $3, $4, 'active', 'Тестовая оплата (нет платёжного шлюза)')
+                RETURNING *
+            """, company_id, plan_id, start, end)
+            payment = await conn.fetchrow("""
+                INSERT INTO saas_payments (company_id, subscription_id, amount, payment_date, note)
+                VALUES ($1, $2, $3, $4, 'Тестовая оплата')
+                RETURNING *
+            """, company_id, sub["id"], amount, start)
+            await conn.execute(
+                "UPDATE companies SET plan=$1, max_branches=$2, max_staff=$3 WHERE id=$4",
+                plan["slug"], plan["max_branches"], plan["max_staff"], company_id)
+    return {"subscription": dict(sub), "payment": dict(payment), "plan": dict(plan)}
+
+
 async def get_saas_payments(company_id: int):
     if not pool: return []
     async with pool.acquire() as conn:

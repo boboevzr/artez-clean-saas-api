@@ -10981,6 +10981,62 @@ async def company_settings_update(req: CompanySettingsRequest, staff=Depends(get
     return {"ok": True}
 
 
+# ── Тарифы компании (самообслуживание админа) ────────────────────────────────
+@app.get("/api/company/plans")
+async def company_list_plans(staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    plans = await db.get_saas_plans()
+    return {"ok": True, "plans": [p for p in plans if p.get("active")]}
+
+
+@app.get("/api/company/subscription")
+async def company_get_subscription(staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    sub = await db.get_saas_subscription(company_id)
+    return {"ok": True, "subscription": dict(sub) if sub else None}
+
+
+class CheckoutRequest(BaseModel):
+    plan_id: int
+    months: int = 1
+
+
+@app.post("/api/company/checkout")
+async def company_checkout(req: CheckoutRequest, staff=Depends(get_current_staff)):
+    """ТЕСТОВЫЙ режим оплаты — платёжный шлюз (Click/Payme) ещё не подключён,
+    поэтому подтверждение сразу применяет тариф к компании."""
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    result = await db.checkout_plan_test(company_id, req.plan_id, req.months)
+    if not result:
+        raise HTTPException(status_code=400, detail="Тариф не найден")
+    return {"ok": True, **result}
+
+
+@app.get("/api/company/support-contact")
+async def company_support_contact(staff=Depends(get_current_staff)):
+    """Контакты поддержки SaaS-платформы (настраивает суперадмин, company_id=0)."""
+    tg = await db.get_config_for_company("saas_support_tg", 0)
+    phone = await db.get_config_for_company("saas_support_phone", 0)
+    return {"ok": True, "telegram": tg or "", "phone": phone or ""}
+
+
+class SupportContactRequest(BaseModel):
+    telegram: str = ""
+    phone: str = ""
+
+
+@app.put("/api/saas/support-contact")
+async def saas_update_support_contact(req: SupportContactRequest, _=Depends(get_superadmin)):
+    await db.set_config_for_company("saas_support_tg", req.telegram, 0)
+    await db.set_config_for_company("saas_support_phone", req.phone, 0)
+    return {"ok": True}
+
+
 _ROLE_PERMS_DEFAULT = {
     "manager": ["dashboard","plans","leads","orders","routes","cash","promotions",
                 "clients","contacts","site-users",
