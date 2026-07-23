@@ -1624,6 +1624,34 @@ async def ensure_saas_schema():
             pass
     logging.info("✅ API: users per-company constraint (step 34) ready — прод (ARTEZ PROJECT) не затронут, это отдельная БД SaaS")
 
+    # ── Шаг 35: site_contacts per-company (был global PRIMARY KEY(branch)) ──
+    async with pool.acquire() as c:
+        try:
+            rows = await c.fetch("""
+                SELECT conname FROM pg_constraint
+                WHERE conrelid='site_contacts'::regclass AND contype IN ('p','u')
+                  AND array_length(conkey,1)=1
+                  AND conkey[1]=(SELECT attnum FROM pg_attribute
+                                 WHERE attrelid='site_contacts'::regclass AND attname='branch')
+            """)
+            for r in rows:
+                try:
+                    await c.execute(f'ALTER TABLE site_contacts DROP CONSTRAINT IF EXISTS "{r["conname"]}"')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            await c.execute("""
+                DO $$ BEGIN
+                  ALTER TABLE site_contacts ADD CONSTRAINT site_contacts_co_branch UNIQUE (company_id, branch);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+        except Exception:
+            pass
+    logging.info("✅ API: site_contacts per-company constraint (step 35) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ

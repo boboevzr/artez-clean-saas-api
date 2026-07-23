@@ -2990,8 +2990,10 @@ async def contacts_purge(req: ContactsPurgeRequest):
 
 
 @app.get("/api/prices")
-async def get_prices():
+async def get_prices(company_slug: str = None):
     """Возвращает актуальные цены из БД для калькулятора и прайс-листа на сайте"""
+    cid = await _resolve_client_company_id(company_slug)
+    db.set_request_company(cid)
     prices = await db.get_all_prices()
     if not prices:
         # Дефолты на случай пустой таблицы
@@ -3174,10 +3176,12 @@ async def promo_status(channel: str = "site", user = Depends(get_current_user)):
 
 
 @app.get("/api/promo/public")
-async def promo_public():
+async def promo_public(company_slug: str = None):
     """Общая информация об активной акции для НЕзарегистрированных посетителей
     (реклама без персонального трекинга/окна). mode всегда 'public' или 'none'."""
     try:
+        cid = await _resolve_client_company_id(company_slug)
+        db.set_request_company(cid)
         result = await db.get_active_promotion_public()
     except Exception as e:
         logging.error(f"promo_public failed: {e}")
@@ -4086,8 +4090,10 @@ async def admin_set_price(req: SetPriceRequest, _=Depends(get_admin)):
     return {"ok": True}
 
 @app.get("/api/services")
-async def get_services_public():
+async def get_services_public(company_slug: str = None):
     """Публичный эндпоинт — список услуг с именами RU/UZ"""
+    cid = await _resolve_client_company_id(company_slug)
+    db.set_request_company(cid)
     svcs = await db.get_services()
     return {"ok": True, "services": svcs}
 
@@ -6560,11 +6566,13 @@ async def get_pending_position_requests(staff=Depends(get_current_staff)):
 
 # ── Контакты филиалов (публичный GET) ────────────────────────────────────────
 @app.get("/api/site-contacts")
-async def get_site_contacts():
+async def get_site_contacts(company_slug: str = None):
     if not db.pool:
         return {"ok": True, "contacts": []}
+    cid = await _resolve_client_company_id(company_slug)
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM site_contacts ORDER BY branch")
+        rows = await conn.fetch(
+            "SELECT * FROM site_contacts WHERE company_id=$1 ORDER BY branch", cid)
     return {"ok": True, "contacts": [dict(r) for r in rows]}
 
 # ── Обновление контактов (только админ) ──────────────────────────────────────
@@ -6576,19 +6584,19 @@ class SiteContactsIn(BaseModel):
     instagram:   str  = ""
 
 @app.put("/api/admin/site-contacts/{branch}")
-async def update_site_contacts(branch: str, data: SiteContactsIn, admin=Depends(get_admin)):
+async def update_site_contacts(branch: str, data: SiteContactsIn, cid: int = Depends(_get_admin_cid)):
     if not db.pool:
         raise HTTPException(503)
     import json
     async with db.pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO site_contacts (branch, branch_name, phones, telegram, whatsapp, instagram)
-            VALUES ($1,$2,$3::jsonb,$4,$5,$6)
-            ON CONFLICT (branch) DO UPDATE SET
+            INSERT INTO site_contacts (branch, branch_name, phones, telegram, whatsapp, instagram, company_id)
+            VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7)
+            ON CONFLICT (company_id, branch) DO UPDATE SET
                 branch_name=$2, phones=$3::jsonb,
                 telegram=$4, whatsapp=$5, instagram=$6
         """, branch, data.branch_name, json.dumps(data.phones, ensure_ascii=False),
-             data.telegram, data.whatsapp, data.instagram)
+             data.telegram, data.whatsapp, data.instagram, cid)
     return {"ok": True}
 
 @app.get("/api/staff/pending-reviews")
@@ -7551,8 +7559,10 @@ OSAGO_DEFAULT = {"tier1": 200000, "tier2": 400000, "tier3": 700000,
                   "pct1": 5, "pct2": 10, "pct3": 20}
 
 @app.get("/api/settings/osago")
-async def get_osago_settings():
+async def get_osago_settings(company_slug: str = None):
     import json
+    cid = await _resolve_client_company_id(company_slug)
+    db.set_request_company(cid)
     raw = await db.get_config("osago_tiers")
     if raw:
         try:
@@ -7584,7 +7594,9 @@ async def get_self_pickup_discount(_=Depends(get_admin)):
     return {"ok": True, "discount": float(val) if val else 0.0}
 
 @app.get("/api/settings/self-pickup-discount")
-async def get_self_pickup_discount_public():
+async def get_self_pickup_discount_public(company_slug: str = None):
+    cid = await _resolve_client_company_id(company_slug)
+    db.set_request_company(cid)
     val = await db.get_config("self_pickup_discount")
     return {"ok": True, "discount": float(val) if val else 0.0}
 
@@ -7600,7 +7612,9 @@ async def get_delivery_discount(_=Depends(get_admin)):
     return {"ok": True, "discount": float(val) if val else 0.0}
 
 @app.get("/api/settings/delivery-discount")
-async def get_delivery_discount_public():
+async def get_delivery_discount_public(company_slug: str = None):
+    cid = await _resolve_client_company_id(company_slug)
+    db.set_request_company(cid)
     val = await db.get_config("delivery_discount_pct")
     return {"ok": True, "discount": float(val) if val else 0.0}
 
@@ -7701,8 +7715,10 @@ async def _get_cfg(key: str) -> str:
     return SITE_SETTINGS_DEFAULTS.get(key, "")
 
 @app.get("/api/settings/site")
-async def get_site_settings():
+async def get_site_settings(company_slug: str = None):
     # Публичный эндпоинт — соцсети, контакты и ключ карты (не секреты)
+    cid = await _resolve_client_company_id(company_slug)
+    db.set_request_company(cid)
     PUBLIC_KEYS = [
         "social_instagram", "social_tg_bot", "social_tg_group",
         "contact_short", "contact_main",
