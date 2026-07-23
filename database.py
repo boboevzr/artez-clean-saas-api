@@ -1596,14 +1596,47 @@ async def ensure_saas_schema():
         except Exception as e:
             logging.warning(f"step 33b expense_categories template seed error: {e}")
 
+    # ── Шаг 34: users per-company UNIQUE constraint (был global UNIQUE(phone)) ──
+    async with pool.acquire() as c:
+        try:
+            rows = await c.fetch("""
+                SELECT conname FROM pg_constraint
+                WHERE conrelid='users'::regclass AND contype='u'
+                  AND array_length(conkey,1)=1
+                  AND conkey[1]=(SELECT attnum FROM pg_attribute
+                                 WHERE attrelid='users'::regclass AND attname='phone')
+            """)
+            for r in rows:
+                try:
+                    await c.execute(f'ALTER TABLE users DROP CONSTRAINT IF EXISTS "{r["conname"]}"')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            await c.execute("""
+                DO $$ BEGIN
+                  ALTER TABLE users ADD CONSTRAINT users_co_phone UNIQUE (company_id, phone);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+        except Exception:
+            pass
+    logging.info("✅ API: users per-company constraint (step 34) ready — прод (ARTEZ PROJECT) не затронут, это отдельная БД SaaS")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
 # ══════════════════════════════════════
-async def get_user_by_phone(phone: str):
+async def get_user_by_phone(phone: str, company_id: int = 1):
+    # company_id по умолчанию =1: вызывается и из bot-flow (tg-phone-link,
+    # register-via-tg), который пока не несёт company_id (см. память
+    # project_saas_security_idor, пробел #2 — таблица clients тоже без
+    # company_id). Веб-эндпоинты (register/login/verify/resend) передают
+    # реальный company_id явно, резолвя company_slug из фронтенда.
     if not pool: return None
     async with pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM users WHERE phone=$1", phone)
+        return await conn.fetchrow("SELECT * FROM users WHERE phone=$1 AND company_id=$2", phone, company_id)
 
 
 async def get_user_by_id(user_id: int):
@@ -1624,27 +1657,27 @@ async def get_user_by_tg_id(tg_id):
                 return None
 
 
-async def create_user(phone: str, password_hash: str, first_name: str):
+async def create_user(phone: str, password_hash: str, first_name: str, company_id: int = 1):
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow("""
-            INSERT INTO users (phone, password_hash, first_name, is_verified)
-            VALUES ($1, $2, $3, FALSE)
-            ON CONFLICT (phone) DO UPDATE SET
+            INSERT INTO users (phone, password_hash, first_name, is_verified, company_id)
+            VALUES ($1, $2, $3, FALSE, $4)
+            ON CONFLICT (company_id, phone) DO UPDATE SET
                 password_hash = EXCLUDED.password_hash,
                 first_name    = EXCLUDED.first_name,
                 updated_at    = NOW()
             RETURNING *
-        """, phone, password_hash, first_name)
+        """, phone, password_hash, first_name, company_id)
 
 
-async def verify_user(phone: str):
+async def verify_user(phone: str, company_id: int = 1):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
             UPDATE users SET is_verified = TRUE, updated_at = NOW()
-            WHERE phone = $1
-        """, phone)
+            WHERE phone = $1 AND company_id = $2
+        """, phone, company_id)
 
 
 async def link_user_tg_id(phone: str, tg_id: int):

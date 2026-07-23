@@ -699,6 +699,7 @@ class RegisterRequest(BaseModel):
     first_name: str
     via_tg: bool = False
     lang: str = "ru"
+    company_slug: str | None = None
 
     @field_validator("phone")
     @classmethod
@@ -718,6 +719,7 @@ class RegisterRequest(BaseModel):
 class VerifyRequest(BaseModel):
     phone: str
     code: str
+    company_slug: str | None = None
 
     @field_validator("phone")
     @classmethod
@@ -727,6 +729,7 @@ class VerifyRequest(BaseModel):
 class LoginRequest(BaseModel):
     phone: str
     password: str
+    company_slug: str | None = None
 
     @field_validator("phone")
     @classmethod
@@ -737,11 +740,23 @@ class ResendCodeRequest(BaseModel):
     phone: str
     purpose: str = "register"
     via_tg: bool = False
+    company_slug: str | None = None
 
     @field_validator("phone")
     @classmethod
     def validate_phone(cls, v):
         return normalize_phone(v)
+
+
+async def _resolve_client_company_id(company_slug: str | None) -> int:
+    """slug -> company_id для клиентских (сайт) эндпоинтов. Без slug — дефолт 1
+    (обратная совместимость, пока фронтенд не везде передаёт APP_COMPANY_SLUG)."""
+    if not company_slug:
+        return 1
+    cid = await db.get_company_id_by_slug(company_slug.strip().lower())
+    if not cid:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    return cid
 
 
 class AgentApplyRequest(BaseModel):
@@ -898,11 +913,12 @@ async def sms_text(code: str, purpose: str = "register") -> str:
 # ══════════════════════════════════════
 #  JWT
 # ══════════════════════════════════════
-def create_token(user_id: int, phone: str) -> str:
+def create_token(user_id: int, phone: str, company_id: int = 1) -> str:
     payload = {
         "sub": str(user_id),
         "phone": phone,
         "type": "client",
+        "company_id": company_id,
         "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -3015,7 +3031,8 @@ async def tg_phone_link(body: dict):
 @app.post("/api/register")
 async def register(req: RegisterRequest):
     uz = req.lang == "uz"
-    existing = await db.get_user_by_phone(req.phone)
+    cid = await _resolve_client_company_id(req.company_slug)
+    existing = await db.get_user_by_phone(req.phone, cid)
     if existing and existing["is_verified"]:
         raise HTTPException(status_code=400, detail=(
             "Bu raqam allaqachon ro'yxatdan o'tgan" if uz
@@ -3026,7 +3043,7 @@ async def register(req: RegisterRequest):
         raise HTTPException(status_code=429, detail=err)
 
     password_hash = pwd_context.hash(req.password[:72])
-    await db.create_user(req.phone, password_hash, req.first_name)
+    await db.create_user(req.phone, password_hash, req.first_name, cid)
 
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
@@ -3053,15 +3070,16 @@ async def register(req: RegisterRequest):
 
 @app.post("/api/verify")
 async def verify(req: VerifyRequest):
+    cid = await _resolve_client_company_id(req.company_slug)
     ok = await db.check_sms_code(req.phone, req.code, "register")
     if not ok:
         raise HTTPException(status_code=400, detail=bi("Неверный или просроченный код","Noto'g'ri yoki muddati o'tgan kod"))
 
-    await db.verify_user(req.phone)
-    user = await db.get_user_by_phone(req.phone)
+    await db.verify_user(req.phone, cid)
+    user = await db.get_user_by_phone(req.phone, cid)
     asyncio.create_task(db.update_user_last_login(user["id"]))
     asyncio.create_task(_notify_new_site_user(user.get("first_name") or "", user["phone"], "sms"))
-    token = create_token(user["id"], user["phone"])
+    token = create_token(user["id"], user["phone"], cid)
 
     return {
         "ok": True,
@@ -3079,7 +3097,8 @@ async def verify(req: VerifyRequest):
 
 @app.post("/api/resend-code")
 async def resend_code(req: ResendCodeRequest):
-    user = await db.get_user_by_phone(req.phone)
+    cid = await _resolve_client_company_id(req.company_slug)
+    user = await db.get_user_by_phone(req.phone, cid)
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
@@ -3103,7 +3122,8 @@ async def resend_code(req: ResendCodeRequest):
 
 @app.post("/api/login")
 async def login(req: LoginRequest):
-    user = await db.get_user_by_phone(req.phone)
+    cid = await _resolve_client_company_id(req.company_slug)
+    user = await db.get_user_by_phone(req.phone, cid)
     if not user or not pwd_context.verify(req.password[:72], user["password_hash"]):
         raise HTTPException(status_code=401, detail=bi("Неверный номер или пароль","Noto'g'ri telefon yoki parol"))
 
@@ -3111,7 +3131,7 @@ async def login(req: LoginRequest):
         raise HTTPException(status_code=403, detail=bi("Номер не подтверждён. Запросите код заново","Raqam tasdiqlanmagan. Kodni qayta so'rang"))
 
     asyncio.create_task(db.update_user_last_login(user["id"]))
-    token = create_token(user["id"], user["phone"])
+    token = create_token(user["id"], user["phone"], cid)
     return {
         "ok": True,
         "token": token,
