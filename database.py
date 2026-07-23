@@ -6198,12 +6198,13 @@ async def is_first_client_message(session_id: int) -> bool:
         return count == 0
 
 async def get_active_chat_by_phone(phone: str) -> dict:
-    """Найти активный/pending чат клиента по номеру телефона."""
+    """Найти активный/pending чат клиента (своей компании) по номеру телефона."""
     if not pool or not phone: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM chat_sessions WHERE client_phone=$1 AND status IN ('pending','active') ORDER BY created_at DESC LIMIT 1",
-            phone.strip()
+            "SELECT * FROM chat_sessions WHERE client_phone=$1 AND company_id=$2 AND status IN ('pending','active') ORDER BY created_at DESC LIMIT 1",
+            phone.strip(), cid
         )
         return dict(row) if row else None
 
@@ -6259,11 +6260,12 @@ async def get_chat_messages(session_id: int) -> list:
         )
         return [dict(r) for r in rows]
 
-async def get_staff_for_chat_push() -> list:
+async def get_staff_for_chat_push(company_id: int) -> list:
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id FROM staff WHERE active=TRUE AND role IN ('admin','manager','callcenter')"
+            "SELECT id FROM staff WHERE active=TRUE AND company_id=$1 AND role IN ('admin','manager','callcenter')",
+            company_id
         )
         return [r['id'] for r in rows]
 

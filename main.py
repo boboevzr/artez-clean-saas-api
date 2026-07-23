@@ -4455,7 +4455,7 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             "status_label": _status_labels_bc.get(status, status),
             "changed_by_name": actor_name,
             "changed_by_role": staff.get("role", ""),
-        }, exclude=staff.get("id"))
+        }, exclude=staff.get("id"), company_id=staff.get("company_id") or 1)
     except Exception as e:
         logging.warning(f"order_status_changed broadcast error: {e}")
 
@@ -6532,7 +6532,7 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     try:
         await _chat.broadcast_staff({"type": "item_updated", "order_id": order_id, "item_id": item_id},
-                                     exclude=staff.get("id"))
+                                     exclude=staff.get("id"), company_id=staff.get("company_id") or 1)
     except Exception as e:
         logging.warning(f"item_updated broadcast error: {e}")
     return {"ok": True, "item": item}
@@ -6818,7 +6818,7 @@ async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_c
     await db.add_order_activity(order_id, staff.get("id"), sname, action_type, item.get("service",""))
     try:
         await _chat.broadcast_staff({"type": "item_updated", "order_id": order_id, "item_id": item_id},
-                                     exclude=staff.get("id"))
+                                     exclude=staff.get("id"), company_id=staff.get("company_id") or 1)
     except Exception as e:
         logging.warning(f"item_updated broadcast error: {e}")
     return {"ok": True, "item": item}
@@ -8214,6 +8214,7 @@ class _ChatMgr:
     def __init__(self):
         self.clients: dict[str, set] = {}   # code → set of WebSocket (multi-device)
         self.staff:   dict[int,  WebSocket] = {}   # staff_id → ws
+        self.staff_company: dict[int, int] = {}    # staff_id → company_id (изоляция broadcast между компаниями)
 
     async def connect_client(self, code: str, ws: WebSocket):
         await ws.accept()
@@ -8221,9 +8222,10 @@ class _ChatMgr:
             self.clients[code] = set()
         self.clients[code].add(ws)
 
-    async def connect_staff(self, staff_id: int, ws: WebSocket):
+    async def connect_staff(self, staff_id: int, ws: WebSocket, company_id: int = 1):
         await ws.accept()
         self.staff[staff_id] = ws
+        self.staff_company[staff_id] = company_id
 
     def disconnect_client(self, code: str, ws: WebSocket = None):
         if ws is not None:
@@ -8235,6 +8237,7 @@ class _ChatMgr:
 
     def disconnect_staff(self, staff_id: int):
         self.staff.pop(staff_id, None)
+        self.staff_company.pop(staff_id, None)
 
     async def send_client(self, code: str, data: dict):
         dead = []
@@ -8249,16 +8252,20 @@ class _ChatMgr:
             try: await ws.send_json(data)
             except: self.disconnect_staff(staff_id)
 
-    async def broadcast_staff(self, data: dict, exclude: int = None):
+    async def broadcast_staff(self, data: dict, exclude: int = None, company_id: int = None):
+        """company_id обязателен для межтенантной изоляции — без него шлёт ВСЕМ подключённым сотрудникам всех компаний."""
         dead = []
         for sid, ws in list(self.staff.items()):
             if sid == exclude: continue
+            if company_id is not None and self.staff_company.get(sid) != company_id: continue
             try: await ws.send_json(data)
             except: dead.append(sid)
         for sid in dead: self.disconnect_staff(sid)
 
-    def staff_online_ids(self) -> set:
-        return set(self.staff.keys())
+    def staff_online_ids(self, company_id: int = None) -> set:
+        if company_id is None:
+            return set(self.staff.keys())
+        return {sid for sid in self.staff if self.staff_company.get(sid) == company_id}
 
 _chat = _ChatMgr()
 
@@ -8281,7 +8288,8 @@ async def _chat_timeout_worker():
                     if claimed:
                         await _chat.send_staff(claimed, {"type": "message", "code": s['code'], "msg": _msg_json(msg)})
                     else:
-                        await _chat.broadcast_staff({"type": "message", "code": s['code'], "msg": _msg_json(msg)})
+                        await _chat.broadcast_staff({"type": "message", "code": s['code'], "msg": _msg_json(msg)},
+                                                     company_id=s.get('company_id'))
                 await db.set_chat_warned(s['code'])
 
             # 2. Закрыть
@@ -8299,12 +8307,13 @@ async def _chat_timeout_worker():
                     if claimed:
                         await _chat.send_staff(claimed, {"type": "message", "code": s['code'], "msg": _msg_json(msg)})
                     else:
-                        await _chat.broadcast_staff({"type": "message", "code": s['code'], "msg": _msg_json(msg)})
+                        await _chat.broadcast_staff({"type": "message", "code": s['code'], "msg": _msg_json(msg)},
+                                                     company_id=s.get('company_id'))
                 await asyncio.sleep(1)
                 closed = await db.close_chat_session(s['code'])
                 if closed:
                     await _chat.send_client(s['code'], {"type": "chat_closed"})
-                    await _chat.broadcast_staff({"type": "chat_closed", "code": s['code']})
+                    await _chat.broadcast_staff({"type": "chat_closed", "code": s['code']}, company_id=s.get('company_id'))
         except Exception as e:
             logging.warning(f"_chat_timeout_worker error: {e}")
         await asyncio.sleep(60)
@@ -8326,6 +8335,8 @@ async def chat_start(body: dict = Body(...)):
     client_name  = (body.get("client_name")  or "").strip()
     branch       = (body.get("branch")       or "").strip()
     lang         = (body.get("lang")         or "uz").strip().lower()[:5]
+    cid = await _resolve_client_company_id(body.get("company_slug"))
+    db.set_request_company(cid)
 
     code = _gen_chat_code()
     session = await db.create_chat_session(code, client_phone, client_name, branch, lang)
@@ -8336,7 +8347,7 @@ async def chat_start(body: dict = Body(...)):
         "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время.", session)
     await db.add_chat_message(session['id'], 'bot', 'ARTEZ', welcome)
 
-    # Уведомить подключённых сотрудников через WS
+    # Уведомить подключённых сотрудников той же компании через WS
     await _chat.broadcast_staff({
         "type": "new_chat",
         "code": code,
@@ -8344,11 +8355,11 @@ async def chat_start(body: dict = Body(...)):
         "client_phone": client_phone,
         "branch": branch,
         "created_at": session['created_at'].isoformat() if hasattr(session.get('created_at'), 'isoformat') else str(session.get('created_at','')),
-    })
+    }, company_id=cid)
 
-    # Push сотрудникам, которые не подключены
-    staff_ids = await db.get_staff_for_chat_push()
-    online    = _chat.staff_online_ids()
+    # Push сотрудникам той же компании, которые не подключены
+    staff_ids = await db.get_staff_for_chat_push(cid)
+    online    = _chat.staff_online_ids(cid)
     for sid in staff_ids:
         if sid not in online:
             asyncio.create_task(send_web_push(
@@ -8377,7 +8388,7 @@ async def chat_sessions(staff=Depends(get_current_staff)):
 @app.get("/api/chat/{code}/messages")
 async def chat_get_messages(code: str, staff=Depends(get_current_staff)):
     session = await db.get_chat_session(code)
-    if not session:
+    if not session or session.get('company_id') != (staff.get('company_id') or 1):
         raise HTTPException(404, "Сессия не найдена")
     msgs = await db.get_chat_messages(session['id'])
     s = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in session.items()}
@@ -8386,13 +8397,17 @@ async def chat_get_messages(code: str, staff=Depends(get_current_staff)):
 
 @app.post("/api/chat/{code}/claim")
 async def chat_claim(code: str, staff=Depends(get_current_staff)):
+    existing = await db.get_chat_session(code)
+    if not existing or existing.get('company_id') != (staff.get('company_id') or 1):
+        raise HTTPException(404, "Сессия не найдена")
     name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or "Менеджер"
     session = await db.claim_chat_session(code, staff['id'], name)
     if not session:
         raise HTTPException(400, "Чат уже занят другим сотрудником")
 
     await _chat.broadcast_staff({"type": "chat_claimed", "code": code,
-                                  "claimed_by": staff['id'], "claimed_name": name})
+                                  "claimed_by": staff['id'], "claimed_name": name},
+                                 company_id=session.get('company_id'))
     await _chat.send_client(code, {"type": "staff_joined", "staff_name": name})
     s = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in session.items()}
     return {"ok": True, "session": s}
@@ -8400,10 +8415,13 @@ async def chat_claim(code: str, staff=Depends(get_current_staff)):
 
 @app.post("/api/chat/{code}/close")
 async def chat_close(code: str, staff=Depends(get_current_staff)):
+    existing = await db.get_chat_session(code)
+    if not existing or existing.get('company_id') != (staff.get('company_id') or 1):
+        raise HTTPException(404, "Сессия не найдена")
     session = await db.close_chat_session(code)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
-    await _chat.broadcast_staff({"type": "chat_closed", "code": code})
+    await _chat.broadcast_staff({"type": "chat_closed", "code": code}, company_id=session.get('company_id'))
     await _chat.send_client(code, {"type": "chat_closed",
                                     "text": "Чат завершён. Спасибо, что обратились в ARTEZ!"})
     return {"ok": True}
@@ -8418,10 +8436,12 @@ async def seed_templates(staff=Depends(get_current_staff)):
     return {"ok": True}
 
 @app.get("/api/chat/active-by-phone")
-async def chat_active_by_phone(phone: str):
+async def chat_active_by_phone(phone: str, company_slug: str = None):
     """Публичный эндпоинт — проверить есть ли активный чат для этого номера."""
     if not phone:
         return {"session": None}
+    cid = await _resolve_client_company_id(company_slug)
+    db.set_request_company(cid)
     session = await db.get_active_chat_by_phone(phone)
     if not session:
         return {"session": None}
@@ -8544,7 +8564,7 @@ async def ws_chat_client(websocket: WebSocket, code: str):
             if claimed:
                 await _chat.send_staff(claimed, payload)
             else:
-                await _chat.broadcast_staff(payload)
+                await _chat.broadcast_staff(payload, company_id=session.get('company_id'))
             # Авто-ответ на первое сообщение клиента (через 3 сек)
             if is_first:
                 async def _send_auto_reply(c=code, sess=dict(session), cl=claimed):
@@ -8561,7 +8581,7 @@ async def ws_chat_client(websocket: WebSocket, code: str):
                     if cl:
                         await _chat.send_staff(cl, auto_payload)
                     else:
-                        await _chat.broadcast_staff(auto_payload)
+                        await _chat.broadcast_staff(auto_payload, company_id=sess.get('company_id'))
                 asyncio.create_task(_send_auto_reply())
     except (WebSocketDisconnect, Exception):
         pass
@@ -8574,11 +8594,12 @@ async def ws_chat_staff(websocket: WebSocket, token: str):
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         staff_id = int(payload.get("sub"))
+        staff_company_id = int(payload.get("company_id") or 1)
     except Exception:
         await websocket.close(code=4001)
         return
 
-    await _chat.connect_staff(staff_id, websocket)
+    await _chat.connect_staff(staff_id, websocket, staff_company_id)
     staff_row = await db.get_staff_by_id(staff_id)
     sname = f"{(staff_row or {}).get('first_name','')} {(staff_row or {}).get('last_name','')}".strip() or "Менеджер"
 
@@ -8592,14 +8613,14 @@ async def ws_chat_staff(websocket: WebSocket, token: str):
             if not code or not text:
                 continue
             session = await db.get_chat_session(code)
-            if not session or session['status'] == 'closed':
+            if not session or session['status'] == 'closed' or session.get('company_id') != staff_company_id:
                 continue
             msg = await db.add_chat_message(session['id'], 'staff', sname, text)
             if not msg:
                 continue
             payload = {"type": "message", "code": code, "msg": _msg_json(msg)}
             await _chat.send_client(code, {"type": "message", "msg": _msg_json(msg)})
-            await _chat.broadcast_staff(payload, exclude=staff_id)
+            await _chat.broadcast_staff(payload, exclude=staff_id, company_id=staff_company_id)
     except (WebSocketDisconnect, Exception):
         pass
     finally:
