@@ -1680,6 +1680,35 @@ async def ensure_saas_schema():
             pass
     logging.info("✅ API: crm_clients per-company constraint (step 36) ready")
 
+    # ── Шаг 37: одноразовый перенос site_contacts → branches (branches — актуальная
+    # таблица филиалов, используется ботом и admin.html; site_contacts был отдельным,
+    # более простым источником для сайта — теперь сайт тоже читает branches) ──
+    async with pool.acquire() as c:
+        try:
+            import json as _json
+            old_rows = await c.fetch("SELECT * FROM site_contacts")
+            for r in old_rows:
+                exists = await c.fetchval(
+                    "SELECT 1 FROM branches WHERE company_id=$1 AND slug=$2",
+                    r["company_id"], r["branch"])
+                if exists:
+                    continue
+                try:
+                    raw_phones = r["phones"]
+                    phones_list = _json.loads(raw_phones) if isinstance(raw_phones, str) else (raw_phones or [])
+                except (TypeError, ValueError):
+                    phones_list = []
+                phones = [{"n": p, "receipt": i == 0, "site": True} for i, p in enumerate(phones_list) if p]
+                await c.execute("""
+                    INSERT INTO branches (company_id, slug, name_ru, name_uz, phones, telegram_link, whatsapp, instagram)
+                    VALUES ($1,$2,$3,$3,$4::jsonb,$5,$6,$7)
+                    ON CONFLICT (company_id, slug) DO NOTHING
+                """, r["company_id"], r["branch"], r["branch_name"] or r["branch"],
+                     _json.dumps(phones, ensure_ascii=False), r["telegram"] or None, r["whatsapp"] or None, r["instagram"] or None)
+        except Exception as e:
+            logging.warning(f"⚠️ API: перенос site_contacts→branches (step 37) частично не удался: {e}")
+    logging.info("✅ API: site_contacts→branches перенос (step 37) готов")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ

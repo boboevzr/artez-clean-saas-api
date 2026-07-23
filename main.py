@@ -6564,40 +6564,30 @@ async def get_pending_position_requests(staff=Depends(get_current_staff)):
         )
     return {"ok": True, "order_ids": [r["id"] for r in rows]}
 
-# ── Контакты филиалов (публичный GET) ────────────────────────────────────────
-@app.get("/api/site-contacts")
-async def get_site_contacts(company_slug: str = None):
+# ── Филиалы (публичный GET) — для сайта: шапка/футер/меню/калькулятор/карта ──
+@app.get("/api/site-branches")
+async def get_site_branches(company_slug: str = None):
+    """Публичный список филиалов компании. Отдаёт только то, что нужно сайту:
+    без внутренних Telegram group/channel id (роутинг заявок) и без workshop-координат."""
     if not db.pool:
-        return {"ok": True, "contacts": []}
+        return {"ok": True, "branches": []}
+    import json
     cid = await _resolve_client_company_id(company_slug)
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM site_contacts WHERE company_id=$1 ORDER BY branch", cid)
-    return {"ok": True, "contacts": [dict(r) for r in rows]}
-
-# ── Обновление контактов (только админ) ──────────────────────────────────────
-class SiteContactsIn(BaseModel):
-    branch_name: str = ""
-    phones:      list = []
-    telegram:    str  = ""
-    whatsapp:    str  = ""
-    instagram:   str  = ""
-
-@app.put("/api/admin/site-contacts/{branch}")
-async def update_site_contacts(branch: str, data: SiteContactsIn, cid: int = Depends(_get_admin_cid)):
-    if not db.pool:
-        raise HTTPException(503)
-    import json
-    async with db.pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO site_contacts (branch, branch_name, phones, telegram, whatsapp, instagram, company_id)
-            VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7)
-            ON CONFLICT (company_id, branch) DO UPDATE SET
-                branch_name=$2, phones=$3::jsonb,
-                telegram=$4, whatsapp=$5, instagram=$6
-        """, branch, data.branch_name, json.dumps(data.phones, ensure_ascii=False),
-             data.telegram, data.whatsapp, data.instagram, cid)
-    return {"ok": True}
+        rows = await conn.fetch("""
+            SELECT slug, name_ru, name_uz, lat, lon, phones, telegram_link, whatsapp, instagram, admin_tg_link
+            FROM branches WHERE company_id=$1 AND active=TRUE ORDER BY id
+        """, cid)
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            phones = json.loads(d.get("phones") or "[]")
+        except (TypeError, ValueError):
+            phones = d.get("phones") or []
+        d["phones"] = [p.get("n") for p in phones if isinstance(p, dict) and p.get("site") and p.get("n")]
+        result.append(d)
+    return {"ok": True, "branches": result}
 
 @app.get("/api/staff/pending-reviews")
 async def get_pending_reviews(staff=Depends(get_current_staff)):
