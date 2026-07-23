@@ -1680,6 +1680,24 @@ async def ensure_saas_schema():
             pass
     logging.info("✅ API: crm_clients per-company constraint (step 36) ready")
 
+    # ── Шаг 37: города/районы филиалов (для карты и автодополнения адреса) ──
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS branch_cities (
+            id           SERIAL PRIMARY KEY,
+            company_id   INTEGER NOT NULL,
+            branch       VARCHAR(50) NOT NULL,
+            city_name    VARCHAR(100) NOT NULL,
+            city_name_uz VARCHAR(100) DEFAULT '',
+            lat          NUMERIC(9,6) NOT NULL,
+            lng          NUMERIC(9,6) NOT NULL,
+            sort_order   INT DEFAULT 0,
+            created_at   TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_branch_cities_company_branch ON branch_cities(company_id, branch);
+        """)
+    logging.info("✅ API: branch_cities (step 37) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ

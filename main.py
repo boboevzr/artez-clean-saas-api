@@ -6587,6 +6587,8 @@ class SiteContactsIn(BaseModel):
 async def update_site_contacts(branch: str, data: SiteContactsIn, cid: int = Depends(_get_admin_cid)):
     if not db.pool:
         raise HTTPException(503)
+    if not BRANCH_SLUG_RE.match(branch):
+        raise HTTPException(status_code=400, detail="Некорректный идентификатор филиала (латиница/цифры/дефис/подчёркивание)")
     import json
     async with db.pool.acquire() as conn:
         await conn.execute("""
@@ -6598,6 +6600,102 @@ async def update_site_contacts(branch: str, data: SiteContactsIn, cid: int = Dep
         """, branch, data.branch_name, json.dumps(data.phones, ensure_ascii=False),
              data.telegram, data.whatsapp, data.instagram, cid)
     return {"ok": True}
+
+@app.get("/api/admin/site-contacts")
+async def admin_get_site_contacts(cid: int = Depends(_get_admin_cid)):
+    if not db.pool:
+        return {"ok": True, "contacts": []}
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM site_contacts WHERE company_id=$1 ORDER BY branch", cid)
+    return {"ok": True, "contacts": [dict(r) for r in rows]}
+
+@app.delete("/api/admin/site-contacts/{branch}")
+async def delete_site_contacts(branch: str, cid: int = Depends(_get_admin_cid)):
+    if not db.pool:
+        raise HTTPException(503)
+    async with db.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM branch_cities WHERE company_id=$1 AND branch=$2", cid, branch)
+            res = await conn.execute("DELETE FROM site_contacts WHERE company_id=$1 AND branch=$2", cid, branch)
+    if res == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Филиал не найден")
+    return {"ok": True}
+
+# ── Города/районы филиалов (карта + автодополнение адреса) ──────────────────
+class BranchCityIn(BaseModel):
+    branch:       str
+    city_name:    str
+    city_name_uz: str = ""
+    lat:          float
+    lng:          float
+    sort_order:   int = 0
+
+@app.get("/api/admin/branch-cities")
+async def admin_list_branch_cities(branch: str = None, cid: int = Depends(_get_admin_cid)):
+    if not db.pool:
+        return {"ok": True, "cities": []}
+    async with db.pool.acquire() as conn:
+        if branch:
+            rows = await conn.fetch(
+                "SELECT * FROM branch_cities WHERE company_id=$1 AND branch=$2 ORDER BY sort_order, city_name",
+                cid, branch)
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM branch_cities WHERE company_id=$1 ORDER BY branch, sort_order, city_name", cid)
+    return {"ok": True, "cities": [dict(r) for r in rows]}
+
+@app.post("/api/admin/branch-cities")
+async def admin_create_branch_city(data: BranchCityIn, cid: int = Depends(_get_admin_cid)):
+    if not db.pool:
+        raise HTTPException(503)
+    if not BRANCH_SLUG_RE.match(data.branch):
+        raise HTTPException(status_code=400, detail="Некорректный идентификатор филиала")
+    if not (-90 <= data.lat <= 90 and -180 <= data.lng <= 180):
+        raise HTTPException(status_code=400, detail="Некорректные координаты")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO branch_cities (company_id, branch, city_name, city_name_uz, lat, lng, sort_order)
+            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
+        """, cid, data.branch, data.city_name.strip(), data.city_name_uz.strip(), data.lat, data.lng, data.sort_order)
+    return {"ok": True, "city": dict(row)}
+
+@app.put("/api/admin/branch-cities/{city_id}")
+async def admin_update_branch_city(city_id: int, data: BranchCityIn, cid: int = Depends(_get_admin_cid)):
+    if not db.pool:
+        raise HTTPException(503)
+    if not (-90 <= data.lat <= 90 and -180 <= data.lng <= 180):
+        raise HTTPException(status_code=400, detail="Некорректные координаты")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE branch_cities SET city_name=$1, city_name_uz=$2, lat=$3, lng=$4, sort_order=$5
+            WHERE id=$6 AND company_id=$7 RETURNING *
+        """, data.city_name.strip(), data.city_name_uz.strip(), data.lat, data.lng, data.sort_order, city_id, cid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Город не найден")
+    return {"ok": True, "city": dict(row)}
+
+@app.delete("/api/admin/branch-cities/{city_id}")
+async def admin_delete_branch_city(city_id: int, cid: int = Depends(_get_admin_cid)):
+    if not db.pool:
+        raise HTTPException(503)
+    async with db.pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM branch_cities WHERE id=$1 AND company_id=$2", city_id, cid)
+    if res == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Город не найден")
+    return {"ok": True}
+
+@app.get("/api/site-cities")
+async def get_site_cities(company_slug: str = None):
+    """Публичный эндпоинт: список городов/районов по филиалам для калькулятора и карты на сайте."""
+    if not db.pool:
+        return {"ok": True, "cities": []}
+    cid = await _resolve_client_company_id(company_slug)
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT branch, city_name, city_name_uz, lat, lng FROM branch_cities WHERE company_id=$1 ORDER BY branch, sort_order, city_name",
+            cid)
+    return {"ok": True, "cities": [dict(r) for r in rows]}
 
 @app.get("/api/staff/pending-reviews")
 async def get_pending_reviews(staff=Depends(get_current_staff)):
@@ -10696,6 +10794,7 @@ async def company_info(staff=Depends(get_current_staff)):
 
 
 SLUG_RE = re.compile(r"^[a-z0-9-]{3,50}$")
+BRANCH_SLUG_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
 
 class CompanyProfileRequest(BaseModel):
     name: str | None = None
