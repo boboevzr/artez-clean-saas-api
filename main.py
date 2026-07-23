@@ -11030,6 +11030,13 @@ class SupportContactRequest(BaseModel):
     phone: str = ""
 
 
+@app.get("/api/saas/support-contact")
+async def saas_get_support_contact(_=Depends(get_superadmin)):
+    tg = await db.get_config_for_company("saas_support_tg", 0)
+    phone = await db.get_config_for_company("saas_support_phone", 0)
+    return {"ok": True, "telegram": tg or "", "phone": phone or ""}
+
+
 @app.put("/api/saas/support-contact")
 async def saas_update_support_contact(req: SupportContactRequest, _=Depends(get_superadmin)):
     await db.set_config_for_company("saas_support_tg", req.telegram, 0)
