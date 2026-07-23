@@ -1652,6 +1652,34 @@ async def ensure_saas_schema():
             pass
     logging.info("✅ API: site_contacts per-company constraint (step 35) ready")
 
+    # ── Шаг 36: crm_clients per-company (был global UNIQUE(phone)) ──
+    async with pool.acquire() as c:
+        try:
+            rows = await c.fetch("""
+                SELECT conname FROM pg_constraint
+                WHERE conrelid='crm_clients'::regclass AND contype='u'
+                  AND array_length(conkey,1)=1
+                  AND conkey[1]=(SELECT attnum FROM pg_attribute
+                                 WHERE attrelid='crm_clients'::regclass AND attname='phone')
+            """)
+            for r in rows:
+                try:
+                    await c.execute(f'ALTER TABLE crm_clients DROP CONSTRAINT IF EXISTS "{r["conname"]}"')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            await c.execute("""
+                DO $$ BEGIN
+                  ALTER TABLE crm_clients ADD CONSTRAINT crm_clients_co_phone UNIQUE (company_id, phone);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+        except Exception:
+            pass
+    logging.info("✅ API: crm_clients per-company constraint (step 36) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -4211,14 +4239,15 @@ async def upsert_crm_client(phone: str, first_name: str = "", last_name: str = "
                              tg_id: int = None, tg_username: str = None,
                              source: str = "unknown", address: str = "",
                              short_address: str = "") -> dict:
-    """Создаёт или обновляет запись клиента. Статус не понижается."""
+    """Создаёт или обновляет запись клиента своей компании. Статус не понижается."""
     if not pool or not phone:
         return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO crm_clients (phone, first_name, last_name, tg_id, tg_username, source, address, short_address)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (phone) DO UPDATE SET
+            INSERT INTO crm_clients (phone, first_name, last_name, tg_id, tg_username, source, address, short_address, company_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (company_id, phone) DO UPDATE SET
                 first_name    = CASE WHEN $2 != '' THEN $2 ELSE crm_clients.first_name END,
                 last_name     = CASE WHEN $3 != '' THEN $3 ELSE crm_clients.last_name END,
                 tg_id         = COALESCE($4, crm_clients.tg_id),
@@ -4229,7 +4258,7 @@ async def upsert_crm_client(phone: str, first_name: str = "", last_name: str = "
                 updated_at    = NOW()
             RETURNING *
         """, phone, first_name or "", last_name or "", tg_id, tg_username, source,
-             address or "", short_address or "")
+             address or "", short_address or "", cid)
         return dict(row) if row else {}
 
 
@@ -4266,8 +4295,9 @@ async def get_crm_client_by_phone(phone: str) -> dict | None:
 async def get_crm_client_by_id(client_id: int) -> dict | None:
     if not pool:
         return None
+    cid = _cid()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM crm_clients WHERE id = $1", client_id)
+        row = await conn.fetchrow("SELECT * FROM crm_clients WHERE id = $1 AND company_id=$2", client_id, cid)
         return dict(row) if row else None
 
 
@@ -4299,11 +4329,12 @@ async def update_crm_client(client_id: int, **kwargs) -> dict | None:
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return None
-    set_parts = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(fields))
-    vals = [client_id] + list(fields.values())
+    cid = _cid()
+    set_parts = ", ".join(f"{k} = ${i+3}" for i, k in enumerate(fields))
+    vals = [client_id, cid] + list(fields.values())
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE crm_clients SET {set_parts}, updated_at=NOW() WHERE id=$1 RETURNING *",
+            f"UPDATE crm_clients SET {set_parts}, updated_at=NOW() WHERE id=$1 AND company_id=$2 RETURNING *",
             *vals
         )
         return dict(row) if row else None
@@ -4315,6 +4346,7 @@ async def set_crm_client_discount_category(client_id: int, category: str | None,
     При установке фиксирует, кто и когда подтвердил документ. При снятии — очищает и фото."""
     if not pool:
         return None
+    cid = _cid()
     async with pool.acquire() as conn:
         if category:
             row = await conn.fetchrow("""
@@ -4324,9 +4356,9 @@ async def set_crm_client_discount_category(client_id: int, category: str | None,
                     discount_category_verified_by = $4,
                     discount_category_verified_at = NOW(),
                     updated_at                    = NOW()
-                WHERE id = $1
+                WHERE id = $1 AND company_id=$5
                 RETURNING *
-            """, client_id, category, pct, staff_id)
+            """, client_id, category, pct, staff_id, cid)
         else:
             row = await conn.fetchrow("""
                 UPDATE crm_clients SET
@@ -4336,9 +4368,9 @@ async def set_crm_client_discount_category(client_id: int, category: str | None,
                     discount_category_verified_by   = NULL,
                     discount_category_verified_at   = NULL,
                     updated_at                       = NOW()
-                WHERE id = $1
+                WHERE id = $1 AND company_id=$2
                 RETURNING *
-            """, client_id)
+            """, client_id, cid)
         return dict(row) if row else None
 
 
@@ -4346,10 +4378,11 @@ async def save_crm_client_discount_photo(client_id: int, file_id: str) -> dict |
     """Сохраняет file_id фото подтверждающего документа (пенсионное/инвалидное удостоверение)."""
     if not pool:
         return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "UPDATE crm_clients SET discount_category_photo_file_id=$2, updated_at=NOW() WHERE id=$1 RETURNING *",
-            client_id, file_id
+            "UPDATE crm_clients SET discount_category_photo_file_id=$2, updated_at=NOW() WHERE id=$1 AND company_id=$3 RETURNING *",
+            client_id, file_id, cid
         )
         return dict(row) if row else None
 
@@ -4368,12 +4401,13 @@ async def get_crm_client_orders(phone: str, limit: int = 20) -> list[dict]:
 
 
 async def get_crm_clients_count() -> dict:
-    """Возвращает кол-во клиентов по статусам."""
+    """Возвращает кол-во клиентов по статусам (своей компании)."""
     if not pool:
         return {}
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT status, COUNT(*) as cnt FROM crm_clients GROUP BY status"
+            "SELECT status, COUNT(*) as cnt FROM crm_clients WHERE company_id=$1 GROUP BY status", cid
         )
         return {r["status"]: r["cnt"] for r in rows}
 
@@ -4546,8 +4580,9 @@ async def update_contact(contact_id: int, **kwargs) -> dict | None:
 async def delete_crm_client(client_id: int) -> bool:
     if not pool:
         return False
+    cid = _cid()
     async with pool.acquire() as conn:
-        res = await conn.execute("DELETE FROM crm_clients WHERE id=$1", client_id)
+        res = await conn.execute("DELETE FROM crm_clients WHERE id=$1 AND company_id=$2", client_id, cid)
         return res == "DELETE 1"
 
 
