@@ -3727,7 +3727,7 @@ async def agent_apply(req: AgentApplyRequest, user=Depends(get_current_user)):
         return {"ok": True, "already": True, "message": "Вы уже зарегистрированы как агент"}
 
     # Ищем клиента бота по tg_phone = phone сайта
-    client = await db.get_client_by_tg_phone(user["phone"])
+    client = await db.get_client_by_tg_phone(user["phone"], user.get("company_id") or 1)
     if not client:
         # Telegram-контакт не верифицирован — нужно зайти в бот и поделиться номером
         return {"ok": False, "needs_bot": True}
@@ -3952,6 +3952,7 @@ async def register_via_tg(body: dict):
     first_name = (body.get("first_name") or "").strip()
     password   = (body.get("password") or "").strip()
     uz = (body.get("lang") or "ru") == "uz"
+    cid = await _resolve_client_company_id(body.get("company_slug"))
 
     if not phone or not first_name or not password:
         raise HTTPException(400, "Yetishmayotgan maydonlar" if uz else "Заполните все поля")
@@ -3965,20 +3966,20 @@ async def register_via_tg(body: dict):
             if uz else
             "Телефон не найден в боте. Сначала поделитесь номером через бота.")
 
-    existing = await db.get_user_by_phone(phone)
+    existing = await db.get_user_by_phone(phone, cid)
     if existing and existing["is_verified"]:
         raise HTTPException(400,
             "Bu raqam allaqachon ro'yxatdan o'tgan" if uz
             else "Этот номер уже зарегистрирован")
 
     password_hash = pwd_context.hash(password[:72])
-    await db.create_user(phone, password_hash, first_name)
-    await db.verify_user(phone)
+    await db.create_user(phone, password_hash, first_name, cid)
+    await db.verify_user(phone, cid)
     await db.set_user_tg_id(phone, tg_id)
 
-    user = await db.get_user_by_phone(phone)
+    user = await db.get_user_by_phone(phone, cid)
     asyncio.create_task(db.update_user_last_login(user["id"]))
-    token = create_token(user["id"], user["phone"])
+    token = create_token(user["id"], user["phone"], cid)
 
     # Отправляем данные аккаунта в Telegram
     if BOT_TOKEN:

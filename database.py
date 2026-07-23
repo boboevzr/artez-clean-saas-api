@@ -1829,30 +1829,37 @@ async def get_staff_notify_new_users():
 
 async def update_tg_client(tg_id: int, data: dict):
     if not pool: return
+    cid = _cid()
     allowed = {"first_name", "last_name", "phone"}
     fields = {k: v for k, v in data.items() if k in allowed}
     if not fields: return
     sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    cid_idx = len(fields) + 2
     async with pool.acquire() as conn:
         await conn.execute(
-            f"UPDATE clients SET {sets}, updated_at=NOW() WHERE tg_id=$1",
-            tg_id, *fields.values())
+            f"UPDATE clients SET {sets}, updated_at=NOW() WHERE tg_id=$1 AND company_id=${cid_idx}",
+            tg_id, *fields.values(), cid)
 
 async def block_tg_client(tg_id: int, blocked: bool):
     if not pool: return
+    cid = _cid()
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE clients SET blocked=$1 WHERE tg_id=$2", blocked, tg_id)
+        await conn.execute(
+            "UPDATE clients SET blocked=$1 WHERE tg_id=$2 AND company_id=$3", blocked, tg_id, cid)
 
 async def delete_tg_client(tg_id: int):
     if not pool: return
+    cid = _cid()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM clients WHERE tg_id=$1", tg_id)
+        await conn.execute("DELETE FROM clients WHERE tg_id=$1 AND company_id=$2", tg_id, cid)
 
 async def get_all_bot_client_tg_ids() -> list:
-    """Все tg_id клиентов бота (таблица clients)."""
+    """Все tg_id клиентов бота своей компании (таблица clients, company_id пишет бот)."""
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT tg_id FROM clients WHERE tg_id IS NOT NULL")
+        rows = await conn.fetch(
+            "SELECT tg_id FROM clients WHERE tg_id IS NOT NULL AND company_id=$1", cid)
     return [r["tg_id"] for r in rows]
 
 async def set_user_tg_id(phone: str, tg_id: int):
@@ -4812,26 +4819,29 @@ async def seed_company_tg_messages(company_id: int, force: bool = False):
         """, [(s, e, ru, uz, company_id) for s, e, ru, uz in source])
 
 
-async def get_client_by_tg_phone(tg_phone: str) -> dict | None:
-    """Ищет клиента бота по tg_phone (верифицированный) или phone (запасной)."""
+async def get_client_by_tg_phone(tg_phone: str, company_id: int = 1) -> dict | None:
+    """Ищет клиента бота по tg_phone (верифицированный) или phone (запасной), своей компании."""
     if not pool: return None
     alt = tg_phone[1:] if tg_phone.startswith("+") else "+" + tg_phone
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
                 """SELECT tg_id, tg_phone, phone, first_name FROM clients
-                   WHERE tg_phone=$1 OR tg_phone=$2
-                      OR phone=$1    OR phone=$2
+                   WHERE (tg_phone=$1 OR tg_phone=$2
+                      OR phone=$1    OR phone=$2)
+                     AND company_id=$3
                    LIMIT 1""",
-                tg_phone, alt)
+                tg_phone, alt, company_id)
             return dict(row) if row else None
         except Exception:
             return None
 
 
 async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
-    """Клиенты из таблицы бота (clients) — все кто писал в Telegram"""
+    """Клиенты из таблицы бота (clients) — все кто писал в Telegram, своей компании.
+    company_id уже проставляется ботом (см. artez_bot COMPANY_ID) — здесь просто фильтруем."""
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         # Проверяем что таблица clients существует (создаётся ботом)
         exists = await conn.fetchval(
@@ -4850,11 +4860,12 @@ async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
                        NULL::timestamptz AS last_order_at,
                        created_at, {blocked_col}
                 FROM clients
-                WHERE phone ILIKE $1 OR first_name ILIKE $1
-                   OR last_name ILIKE $1 OR tg_username ILIKE $1
+                WHERE company_id=$1
+                  AND (phone ILIKE $2 OR first_name ILIKE $2
+                   OR last_name ILIKE $2 OR tg_username ILIKE $2)
                 ORDER BY created_at DESC
-                LIMIT $2
-            """, f"%{search}%", limit)
+                LIMIT $3
+            """, cid, f"%{search}%", limit)
         else:
             rows = await conn.fetch(f"""
                 SELECT id, tg_id, tg_username, first_name, last_name, phone,
@@ -4863,9 +4874,10 @@ async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
                        NULL::timestamptz AS last_order_at,
                        created_at, {blocked_col}
                 FROM clients
+                WHERE company_id=$1
                 ORDER BY created_at DESC
-                LIMIT $1
-            """, limit)
+                LIMIT $2
+            """, cid, limit)
         return [dict(r) for r in rows]
 
 async def upsert_push_subscription(staff_id: int, endpoint: str, p256dh: str, auth: str):
