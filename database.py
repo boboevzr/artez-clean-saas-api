@@ -1029,7 +1029,7 @@ async def create_tables():
         VALUES
           ('navoi',     'Навои',     '["1221","+998792221221"]', '', '', ''),
           ('zarafshan', 'Зарафшан',  '["1221","+998792221221"]', '', '', '')
-        ON CONFLICT (branch) DO NOTHING;
+        ON CONFLICT DO NOTHING;
         """)
 
     # ── Шаг 13: источник и tg_id клиента в лидах ───────────────────────
