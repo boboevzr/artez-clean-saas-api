@@ -1801,6 +1801,8 @@ async def ensure_saas_schema():
         );
         CREATE INDEX IF NOT EXISTS idx_site_faq_company ON site_faq(company_id, sort_order);
         """)
+    try:
+      async with pool.acquire() as c:
         count_reviews = await c.fetchval("SELECT COUNT(*) FROM site_reviews WHERE company_id=1")
         if count_reviews == 0:
             await c.execute("""
@@ -1837,7 +1839,7 @@ async def ensure_saas_schema():
                 (1, 'Вывоз и доставка действительно бесплатны?', 'Olib ketish va yetkazib berish haqiqatan ham bepulmi?',
                  'Да, вывоз ковров и доставка обратно — полностью бесплатны. Вы платите только за саму чистку. Никаких скрытых платежей.',
                  'Ha, gilamlarni olib ketish va qaytarib yetkazish — mutlaqo bepul. Siz faqat tozalash uchun to''laysiz. Hech qanday yashirin to''lovlar yo''q.', 1),
-                (1, 'Как оплатить? Принимаете безналично?', "Qanday to'lash mumkin? Naqdsiz to'lovni qabul qilasizmi?",
+                (1, 'Как оплатить? Принимаете безналично?', 'Qanday to''lash mumkin? Naqdsiz to''lovni qabul qilasizmi?',
                  'Принимаем наличные, банковский перевод и карту (Uzcard, Humo). Оплата — после получения готовой работы. Частичная предоплата тоже возможна по договорённости.',
                  'Naqd pul, bank o''tkazmasi va karta (Uzcard, Humo) qabul qilamiz. To''lov — tayyor ishni olgandan keyin. Kelishuv bo''yicha qisman oldindan to''lov ham mumkin.', 2),
                 (1, 'Безопасна ли химия для детей и аллергиков?', 'Kimyoviy vositalar bolalar va allergiklarga xavfsizmi?',
@@ -1845,7 +1847,7 @@ async def ensure_saas_schema():
                  'Professional gipoallergen vositalardan foydalanamiz — bolalar va uy hayvonlari uchun xavfsiz. Tozalashdan so''ng gilam qaytarilishidan oldin to''liq quritiladi.', 3),
                 (1, 'Работаете в моём городе?', 'Mening shahrimda ishlaymisiz?',
                  'У нас два филиала: в Навои и Зарафшане. Также обслуживаем прилегающие районы — Учкудук, Тамди, Карманинский, Навбахорский и другие. Позвоните на 1221 — уточним.',
-                 "Bizning ikkita filialimiz bor: Navoiy va Zarafshonda. Shuningdek qo'shni tumanlarga — Uchquduq, Tomdi, Karmana, Navbahor va boshqalarga ham xizmat ko'rsatamiz. 1221 ga qo'ng'iroq qiling — aniqlaymiz.", 4)
+                 'Bizning ikkita filialimiz bor: Navoiy va Zarafshonda. Shuningdek qo''shni tumanlarga — Uchquduq, Tomdi, Karmana, Navbahor va boshqalarga ham xizmat ko''rsatamiz. 1221 ga qo''ng''iroq qiling — aniqlaymiz.', 4)
                 ON CONFLICT DO NOTHING;
             """)
         await c.execute("""
@@ -1854,6 +1856,8 @@ async def ensure_saas_schema():
             ('footer_about_uz', 'Navoiy va Zarafshonda uyga gilam, yumshoq mebel, matras va pardalarni quruq tozalash xizmati. Olib ketish va yetkazib berish — bepul.', 1, NOW())
             ON CONFLICT (company_id, key) DO NOTHING;
         """)
+    except Exception as e:
+      logging.warning(f"⚠️ API: сид отзывов/FAQ (step 39) не удался: {e}")
     logging.info("✅ API: site_reviews/site_faq (step 39) ready")
 
 
