@@ -3091,8 +3091,6 @@ async def verify(req: VerifyRequest):
             "phone": user["phone"],
             "first_name": user["first_name"],
             "address": user["address"],
-            "car_plate": user["car_plate"],
-            "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
         }
     }
 
@@ -3142,23 +3140,18 @@ async def login(req: LoginRequest):
             "phone": user["phone"],
             "first_name": user["first_name"],
             "address": user["address"],
-            "car_plate": user["car_plate"],
-            "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
         }
     }
 
 
 @app.get("/api/me")
 async def me(user = Depends(get_current_user)):
-    expiry = user.get("osago_expiry")
     return {
         "id": user["id"],
         "phone": user["phone"],
         "first_name": user["first_name"],
         "is_verified": user["is_verified"],
         "address": user["address"],
-        "car_plate": user["car_plate"],
-        "osago_expiry": expiry.isoformat() if expiry else None,
         "tg_id": user.get("tg_id"),
     }
 
@@ -3300,8 +3293,6 @@ async def admin_update_promotion(promo_id: int, body: PromotionUpdateRequest, _=
 class UpdateProfileRequest(BaseModel):
     first_name: str
     address: str | None = None
-    car_plate: str | None = None
-    osago_expiry: str | None = None  # ISO date YYYY-MM-DD или null
 
     @field_validator("first_name")
     @classmethod
@@ -3325,14 +3316,7 @@ class UpdatePasswordRequest(BaseModel):
 
 @app.patch("/api/me")
 async def update_profile(req: UpdateProfileRequest, user = Depends(get_current_user)):
-    from datetime import date as date_type
-    expiry = None
-    if req.osago_expiry:
-        try:
-            expiry = date_type.fromisoformat(req.osago_expiry)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Неверный формат даты (ожидается YYYY-MM-DD)")
-    await db.update_user_profile(user["id"], req.first_name, req.address, req.car_plate, expiry)
+    await db.update_user_profile(user["id"], req.first_name, req.address)
     return {"ok": True, "first_name": req.first_name}
 
 
@@ -3891,9 +3875,6 @@ async def admin_get_site_users(search: str = "", _=Depends(_get_admin)):
     rows = await db.get_all_site_users(search=search.strip())
     def _row(r):
         d = dict(r)
-        for k in ("osago_expiry",):
-            if d.get(k) and hasattr(d[k], "isoformat"):
-                d[k] = d[k].isoformat()
         for k in ("created_at", "updated_at", "last_login"):
             if d.get(k) and hasattr(d[k], "isoformat"):
                 d[k] = d[k].isoformat()
@@ -3906,16 +3887,7 @@ async def admin_update_site_user(user_id: int, body: dict, cid: int = Depends(_g
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     first_name   = (body.get("first_name")   or "").strip() or None
     address      = (body.get("address")      or "").strip() or None
-    car_plate    = (body.get("car_plate")    or "").strip().upper() or None
-    osago_str    = (body.get("osago_expiry") or "").strip() or None
-    osago_expiry = None
-    if osago_str:
-        try:
-            from datetime import date as _d
-            osago_expiry = _d.fromisoformat(osago_str)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Неверный формат даты ОСАГО (YYYY-MM-DD)")
-    await db.update_user_profile(user_id, first_name, address, car_plate, osago_expiry)
+    await db.update_user_profile(user_id, first_name, address)
     return {"ok": True}
 
 @app.post("/api/admin/site-users/{user_id}/reset-password")
@@ -4012,8 +3984,6 @@ async def register_via_tg(body: dict):
             "phone": user["phone"],
             "first_name": user["first_name"],
             "address": user.get("address"),
-            "car_plate": user.get("car_plate"),
-            "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
         }
     }
 
@@ -7545,37 +7515,6 @@ async def reject_debt_approval_ep(
     return {"ok": True}
 
 
-OSAGO_DEFAULT = {"tier1": 200000, "tier2": 400000, "tier3": 700000,
-                  "pct1": 5, "pct2": 10, "pct3": 20}
-
-@app.get("/api/settings/osago")
-async def get_osago_settings(company_slug: str = None):
-    import json
-    cid = await _resolve_client_company_id(company_slug)
-    db.set_request_company(cid)
-    raw = await db.get_config("osago_tiers")
-    if raw:
-        try:
-            return {"ok": True, "tiers": json.loads(raw)}
-        except Exception:
-            pass
-    return {"ok": True, "tiers": OSAGO_DEFAULT}
-
-
-class OsagoSettings(BaseModel):
-    tier1: int
-    tier2: int
-    tier3: int
-    pct1: int
-    pct2: int
-    pct3: int
-
-@app.put("/api/admin/settings/osago")
-async def save_osago_settings(body: OsagoSettings, _=Depends(get_admin)):
-    import json
-    await db.set_config("osago_tiers", json.dumps(body.dict()))
-    return {"ok": True}
-
 
 # ── Скидка при самовывозе ─────────────────────────────────────
 @app.get("/api/admin/settings/self-pickup-discount")
@@ -7654,9 +7593,6 @@ SITE_SETTINGS_DEFAULTS = {
     "sms_text_register":   "Kod podtverzhdeniya: {code}",
     "sms_text_login":      "Kod podtverzhdeniya dlya vhoda: {code}",
     "sms_text_reset":      "Kod vosstanovleniya parolya: {code}",
-    # ОСАГО партнёр
-    "osago_partner_phone": "",
-    "osago_partner_promo": "",
     # Google Sheets
     "sheets_url":          "",
     # Группа уведомлений
@@ -7735,7 +7671,6 @@ async def get_site_settings(company_slug: str = None):
         "contact_navoi_1", "contact_navoi_2", "contact_navoi_telegram", "contact_navoi_admin_tg", "contact_navoi_whatsapp", "contact_navoi_instagram",
         "yandex_maps_key",
         "branch_zarafshan_location", "branch_navoi_location",
-        "osago_partner_phone", "osago_partner_promo",
         "footer_about_ru", "footer_about_uz",
         "agent_commission_type", "agent_commission_percent", "agent_commission_fixed",
         "agent_title_ru", "agent_title_uz", "agent_text_ru", "agent_text_uz",
@@ -7791,8 +7726,6 @@ class SiteSettings(BaseModel):
     sms_text_register:   str | None = None
     sms_text_login:      str | None = None
     sms_text_reset:      str | None = None
-    osago_partner_phone: str | None = None
-    osago_partner_promo: str | None = None
     sheets_url:          str | None = None
     leads_group_id:          str | None = None
     leads_group_zarafshan:   str | None = None

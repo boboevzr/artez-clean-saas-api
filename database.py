@@ -2095,7 +2095,7 @@ async def get_all_site_users(search: str = "", limit: int = 500):
     cid = _cid()
     base = """
         SELECT u.id, u.phone, u.first_name, u.is_verified, u.tg_id,
-               u.address, u.car_plate, u.osago_expiry,
+               u.address,
                u.created_at, u.updated_at, u.last_login,
                EXISTS(SELECT 1 FROM staff s WHERE s.site_user_id = u.id AND s.active = TRUE) AS is_agent
         FROM users u
@@ -2123,15 +2123,14 @@ async def update_user_last_login(user_id: int):
         await conn.execute("UPDATE users SET last_login=NOW() WHERE id=$1", user_id)
 
 
-async def update_user_profile(user_id: int, first_name: str, address: str = None,
-                               car_plate: str = None, osago_expiry=None):
+async def update_user_profile(user_id: int, first_name: str, address: str = None):
     # NB: без company_id-фильтра — тоже вызывается из self-service /api/me (см. комментарий
     # в update_user_password). Admin-эндпоинт проверяет владение user_id до вызова.
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
-            UPDATE users SET first_name=$2, address=$3, car_plate=$4, osago_expiry=$5, updated_at=NOW() WHERE id=$1
-        """, user_id, first_name, address, car_plate, osago_expiry)
+            UPDATE users SET first_name=$2, address=$3, updated_at=NOW() WHERE id=$1
+        """, user_id, first_name, address)
 
 
 async def get_staff_notify_new_users():
