@@ -2281,7 +2281,7 @@ async def set_config_for_company(key: str, value: str, company_id: int):
 # ══════════════════════════════════════
 #  ЗАКАЗЫ КЛИЕНТА (для личного кабинета)
 # ══════════════════════════════════════
-async def get_orders_by_phone(phone: str):
+async def get_orders_by_phone(phone: str, company_id: int):
     if not pool: return []
     async with pool.acquire() as conn:
         return await conn.fetch("""
@@ -2289,22 +2289,22 @@ async def get_orders_by_phone(phone: str):
                    pickup_date, pickup_time, total_price, created_at,
                    (SELECT COUNT(*) FROM order_items WHERE order_id=orders.id)::int AS item_count
             FROM orders
-            WHERE client_phone = $1
+            WHERE client_phone = $1 AND company_id = $2
             ORDER BY created_at DESC
             LIMIT 50
-        """, phone)
+        """, phone, company_id)
 
 
-async def cancel_order_by_phone(order_num: str, phone: str):
-    """Отменяет заказ со статусом 'new', принадлежащий этому номеру.
+async def cancel_order_by_phone(order_num: str, phone: str, company_id: int):
+    """Отменяет заказ со статусом 'new', принадлежащий этому номеру (в рамках своей компании).
     Возвращает dict с данными заказа или None если не найден/нельзя отменить."""
     if not pool: return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE orders SET status='cancelled'
-            WHERE order_num=$1 AND client_phone=$2 AND status='new'
+            WHERE order_num=$1 AND client_phone=$2 AND company_id=$3 AND status='new'
             RETURNING order_num, client_first_name, client_last_name, client_phone, service, branch
-        """, order_num, phone)
+        """, order_num, phone, company_id)
         if not row:
             return None
         r = dict(row)
@@ -2894,12 +2894,13 @@ async def create_agent_from_user(user: dict, password_hash: str, branch: str = "
         staff_id = await conn.fetchval("""
             INSERT INTO staff (first_name, phone, login, password_hash, role,
                                tg_id, site_user_id, active, branch,
-                               salary_type, salary_work_days)
-            VALUES ($1,$2,$3,$4,'agent',$5,$6,TRUE,$7,'leads',26)
-            ON CONFLICT (login) DO NOTHING
+                               salary_type, salary_work_days, company_id)
+            VALUES ($1,$2,$3,$4,'agent',$5,$6,TRUE,$7,'leads',26,$8)
+            ON CONFLICT (company_id, login) DO NOTHING
             RETURNING id
         """, user["first_name"], user["phone"], user["phone"],
-            password_hash, user.get("tg_id"), user["id"], branch or None)
+            password_hash, user.get("tg_id"), user["id"], branch or None,
+            user.get("company_id") or 1)
         if staff_id and lead_pct > 0:
             await conn.execute(
                 "INSERT INTO staff_salary_percents (staff_id, role, percent)"

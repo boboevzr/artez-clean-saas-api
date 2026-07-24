@@ -3345,13 +3345,13 @@ async def link_tg(req: LinkTgRequest):
 
 @app.get("/api/orders")
 async def my_orders(user = Depends(get_current_user)):
-    orders = await db.get_orders_by_phone(user["phone"])
+    orders = await db.get_orders_by_phone(user["phone"], user.get("company_id") or 1)
     return {"orders": [dict(o) for o in orders]}
 
 
 @app.post("/api/orders/{order_num}/cancel")
 async def cancel_order(order_num: str, user = Depends(get_current_user)):
-    order = await db.cancel_order_by_phone(order_num, user["phone"])
+    order = await db.cancel_order_by_phone(order_num, user["phone"], user.get("company_id") or 1)
     if not order:
         raise HTTPException(status_code=400, detail="Заказ не найден или уже нельзя отменить")
     asyncio.create_task(notify_group_client_cancel(order))
@@ -3689,7 +3689,7 @@ async def agent_status(user=Depends(get_current_user)):
         if staff and staff["role"] == "agent":
             return {"ok": True, "is_agent": True, "must_change_password": bool(staff.get("must_change_password"))}
     # 3. По номеру телефона (логину)
-    staff = await db.get_staff_by_login(user["phone"])
+    staff = await db.get_staff_by_login(user["phone"], user.get("company_id") or 1)
     if staff and staff["role"] == "agent":
         # Заодно прописываем site_user_id чтобы следующий раз найти быстрее
         await db.link_staff_to_site_user(staff["id"], user["id"])
@@ -3709,7 +3709,7 @@ async def agent_apply(req: AgentApplyRequest, user=Depends(get_current_user)):
     existing = await db.get_staff_by_site_user(user["id"])
     if existing:
         return {"ok": True, "already": True, "message": "Вы уже зарегистрированы как агент"}
-    existing2 = await db.get_staff_by_login(user["phone"])
+    existing2 = await db.get_staff_by_login(user["phone"], user.get("company_id") or 1)
     if existing2 and existing2["role"] == "agent":
         await db.link_staff_to_site_user(existing2["id"], user["id"])
         return {"ok": True, "already": True, "message": "Вы уже зарегистрированы как агент"}
@@ -3786,7 +3786,7 @@ async def agent_apply_by_tg(req: ApplyByTgRequest):
         return {"ok": False, "reason": "no_site_account"}
     if not site_user.get("is_verified"):
         return {"ok": False, "reason": "not_verified"}
-    existing = await db.get_staff_by_login(site_user["phone"])
+    existing = await db.get_staff_by_login(site_user["phone"], site_user.get("company_id") or 1)
     if existing and existing["role"] == "agent":
         return {"ok": True, "already": True, "phone": site_user["phone"]}
     password_hash = site_user.get("password_hash")
