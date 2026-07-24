@@ -10080,6 +10080,9 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     await db.seed_company_expense_categories(company["id"])
     await db.seed_company_chat_templates(company["id"])
     await db.seed_company_site_stats(company["id"])
+    await db.seed_company_site_slides(company["id"])
+    await db.seed_company_site_reviews(company["id"])
+    await db.seed_company_site_faq(company["id"])
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
@@ -10606,6 +10609,139 @@ async def sa_import_chat_tpls(company_id: int, _=Depends(get_superadmin)):
         raise HTTPException(400, "Нельзя применить к шаблону")
     await db.seed_company_chat_templates(company_id, force=True)
     return {"ok": True}
+
+
+# ── Superadmin: шаблоны слайдера/статистики/отзывов/FAQ (company_id=0) ──────
+
+@app.get("/api/saas/catalog/site-slides")
+async def sa_catalog_site_slides(_=Depends(get_superadmin)):
+    return {"ok": True, "slides": await db.get_site_slides(0)}
+
+@app.post("/api/saas/catalog/site-slides")
+async def sa_catalog_create_site_slide(
+    file: UploadFile = File(...),
+    eyebrow_ru: str = Form(""), eyebrow_uz: str = Form(""),
+    title_ru: str = Form(""), title_uz: str = Form(""),
+    text_ru: str = Form(""), text_uz: str = Form(""),
+    sort_order: int = Form(0),
+    _=Depends(get_superadmin),
+):
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть изображением")
+    data = await file.read()
+    if len(data) > MAX_SLIDE_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail=f"Изображение слишком большое (макс. {MAX_SLIDE_IMAGE_BYTES//1000} КБ)")
+    image_url = f"data:{file.content_type};base64,{base64.b64encode(data).decode('ascii')}"
+    slide = await db.create_site_slide(0, image_url, eyebrow_ru, eyebrow_uz, title_ru, title_uz, text_ru, text_uz, sort_order)
+    return {"ok": True, "slide": slide}
+
+@app.put("/api/saas/catalog/site-slides/{slide_id}")
+async def sa_catalog_update_site_slide(slide_id: int, data: SiteSlideText, _=Depends(get_superadmin)):
+    slide = await db.update_site_slide(slide_id, 0, data.model_dump())
+    if not slide:
+        raise HTTPException(status_code=404, detail="Слайд не найден")
+    return {"ok": True, "slide": slide}
+
+@app.post("/api/saas/catalog/site-slides/{slide_id}/image")
+async def sa_catalog_update_site_slide_image(slide_id: int, file: UploadFile = File(...), _=Depends(get_superadmin)):
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть изображением")
+    data = await file.read()
+    if len(data) > MAX_SLIDE_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail=f"Изображение слишком большое (макс. {MAX_SLIDE_IMAGE_BYTES//1000} КБ)")
+    image_url = f"data:{file.content_type};base64,{base64.b64encode(data).decode('ascii')}"
+    slide = await db.update_site_slide_image(slide_id, 0, image_url)
+    if not slide:
+        raise HTTPException(status_code=404, detail="Слайд не найден")
+    return {"ok": True, "slide": slide}
+
+@app.delete("/api/saas/catalog/site-slides/{slide_id}")
+async def sa_catalog_delete_site_slide(slide_id: int, _=Depends(get_superadmin)):
+    ok = await db.delete_site_slide(slide_id, 0)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Слайд не найден")
+    return {"ok": True}
+
+@app.post("/api/saas/companies/{company_id}/import-site-slides")
+async def sa_import_site_slides(company_id: int, _=Depends(get_superadmin)):
+    if company_id <= 0:
+        raise HTTPException(400, "Нельзя применить к шаблону")
+    await db.seed_company_site_slides(company_id, force=True)
+    return {"ok": True}
+
+
+@app.get("/api/saas/catalog/site-reviews")
+async def sa_catalog_site_reviews(_=Depends(get_superadmin)):
+    return {"ok": True, "reviews": await db.get_site_reviews(0)}
+
+@app.post("/api/saas/catalog/site-reviews")
+async def sa_catalog_create_site_review(data: SiteReviewIn, _=Depends(get_superadmin)):
+    review = await db.create_site_review(0, data.model_dump())
+    return {"ok": True, "review": review}
+
+@app.put("/api/saas/catalog/site-reviews/{review_id}")
+async def sa_catalog_update_site_review(review_id: int, data: SiteReviewIn, _=Depends(get_superadmin)):
+    review = await db.update_site_review(review_id, 0, data.model_dump())
+    if not review:
+        raise HTTPException(status_code=404, detail="Отзыв не найден")
+    return {"ok": True, "review": review}
+
+@app.delete("/api/saas/catalog/site-reviews/{review_id}")
+async def sa_catalog_delete_site_review(review_id: int, _=Depends(get_superadmin)):
+    ok = await db.delete_site_review(review_id, 0)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Отзыв не найден")
+    return {"ok": True}
+
+@app.post("/api/saas/companies/{company_id}/import-site-reviews")
+async def sa_import_site_reviews(company_id: int, _=Depends(get_superadmin)):
+    if company_id <= 0:
+        raise HTTPException(400, "Нельзя применить к шаблону")
+    await db.seed_company_site_reviews(company_id, force=True)
+    return {"ok": True}
+
+
+@app.get("/api/saas/catalog/site-faq")
+async def sa_catalog_site_faq(_=Depends(get_superadmin)):
+    return {"ok": True, "faq": await db.get_site_faq(0)}
+
+@app.post("/api/saas/catalog/site-faq")
+async def sa_catalog_create_site_faq(data: SiteFaqIn, _=Depends(get_superadmin)):
+    item = await db.create_site_faq_item(0, data.model_dump())
+    return {"ok": True, "faq": item}
+
+@app.put("/api/saas/catalog/site-faq/{faq_id}")
+async def sa_catalog_update_site_faq(faq_id: int, data: SiteFaqIn, _=Depends(get_superadmin)):
+    item = await db.update_site_faq_item(faq_id, 0, data.model_dump())
+    if not item:
+        raise HTTPException(status_code=404, detail="Вопрос не найден")
+    return {"ok": True, "faq": item}
+
+@app.delete("/api/saas/catalog/site-faq/{faq_id}")
+async def sa_catalog_delete_site_faq(faq_id: int, _=Depends(get_superadmin)):
+    ok = await db.delete_site_faq_item(faq_id, 0)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Вопрос не найден")
+    return {"ok": True}
+
+@app.post("/api/saas/companies/{company_id}/import-site-faq")
+async def sa_import_site_faq(company_id: int, _=Depends(get_superadmin)):
+    if company_id <= 0:
+        raise HTTPException(400, "Нельзя применить к шаблону")
+    await db.seed_company_site_faq(company_id, force=True)
+    return {"ok": True}
+
+
+@app.get("/api/saas/catalog/site-stats")
+async def sa_catalog_site_stats(_=Depends(get_superadmin)):
+    return {"ok": True, "stats": await db.get_site_stats(0)}
+
+@app.put("/api/saas/catalog/site-stats/{stat_id}")
+async def sa_catalog_update_site_stat(stat_id: int, data: SiteStatIn, _=Depends(get_superadmin)):
+    stat = await db.update_site_stat(stat_id, 0, data.model_dump())
+    if not stat:
+        raise HTTPException(status_code=404, detail="Не найдено")
+    return {"ok": True, "stat": stat}
 
 
 class TgTemplateRequest(BaseModel):

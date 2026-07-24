@@ -1770,6 +1770,13 @@ async def ensure_saas_schema():
                 (1, 'Бесплатно', 'вывоз и доставка', 'olib ketish va yetkazish', 3)
                 ON CONFLICT DO NOTHING;
             """)
+        count_stats_tpl = await c.fetchval("SELECT COUNT(*) FROM site_stats WHERE company_id=0")
+        if count_stats_tpl == 0:
+            await c.execute("""
+                INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES
+                (0, '', '', '', 0), (0, '', '', '', 1), (0, '', '', '', 2), (0, '', '', '', 3)
+                ON CONFLICT DO NOTHING;
+            """)
     logging.info("✅ API: site_slides/site_stats (step 38) ready")
 
     # ── Шаг 39: отзывы и FAQ на главной странице сайта ──
@@ -8708,16 +8715,78 @@ async def update_site_stat(stat_id: int, company_id: int, updates: dict) -> dict
 
 
 async def seed_company_site_stats(company_id: int):
-    """Заводит 4 пустые карточки статистики для новой компании (фиксированная 4-колоночная сетка на сайте)."""
+    """Заводит 4 карточки статистики для новой компании — из шаблона (company_id=0, заполняет суперадмин),
+    иначе 4 пустые (фиксированная 4-колоночная сетка на сайте)."""
     if not pool: return
     async with pool.acquire() as conn:
         count = await conn.fetchval("SELECT COUNT(*) FROM site_stats WHERE company_id=$1", company_id)
         if count > 0:
             return
-        await conn.executemany(
-            "INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES ($1,'','','',$2)",
-            [(company_id, i) for i in range(4)]
-        )
+        template = await conn.fetch(
+            "SELECT value, label_ru, label_uz FROM site_stats WHERE company_id=0 ORDER BY sort_order, id LIMIT 4")
+        if template:
+            for i, r in enumerate(template):
+                await conn.execute(
+                    "INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES ($1,$2,$3,$4,$5)",
+                    company_id, r["value"], r["label_ru"], r["label_uz"], i)
+        else:
+            await conn.executemany(
+                "INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES ($1,'','','',$2)",
+                [(company_id, i) for i in range(4)]
+            )
+
+
+async def seed_company_site_slides(company_id: int, force: bool = False):
+    """Копирует шаблонные слайды из company_id=0 (заполняет суперадмин). Пусто, если шаблона нет."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        if not force:
+            exists = await conn.fetchval("SELECT 1 FROM site_slides WHERE company_id=$1 LIMIT 1", company_id)
+            if exists: return
+        if force:
+            await conn.execute("DELETE FROM site_slides WHERE company_id=$1", company_id)
+        template = await conn.fetch("SELECT * FROM site_slides WHERE company_id=0 ORDER BY sort_order, id")
+        for r in template:
+            await conn.execute("""
+                INSERT INTO site_slides (company_id, image_url, eyebrow_ru, eyebrow_uz, title_ru, title_uz, text_ru, text_uz, sort_order)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            """, company_id, r["image_url"], r["eyebrow_ru"], r["eyebrow_uz"], r["title_ru"], r["title_uz"],
+                 r["text_ru"], r["text_uz"], r["sort_order"])
+
+
+async def seed_company_site_reviews(company_id: int, force: bool = False):
+    """Копирует шаблонные отзывы из company_id=0 (заполняет суперадмин). Пусто, если шаблона нет."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        if not force:
+            exists = await conn.fetchval("SELECT 1 FROM site_reviews WHERE company_id=$1 LIMIT 1", company_id)
+            if exists: return
+        if force:
+            await conn.execute("DELETE FROM site_reviews WHERE company_id=$1", company_id)
+        template = await conn.fetch("SELECT * FROM site_reviews WHERE company_id=0 ORDER BY sort_order, id")
+        for r in template:
+            await conn.execute("""
+                INSERT INTO site_reviews (company_id, author_name, rating, text_ru, text_uz, city_ru, city_uz, sort_order)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            """, company_id, r["author_name"], r["rating"], r["text_ru"], r["text_uz"],
+                 r["city_ru"], r["city_uz"], r["sort_order"])
+
+
+async def seed_company_site_faq(company_id: int, force: bool = False):
+    """Копирует шаблонные FAQ из company_id=0 (заполняет суперадмин). Пусто, если шаблона нет."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        if not force:
+            exists = await conn.fetchval("SELECT 1 FROM site_faq WHERE company_id=$1 LIMIT 1", company_id)
+            if exists: return
+        if force:
+            await conn.execute("DELETE FROM site_faq WHERE company_id=$1", company_id)
+        template = await conn.fetch("SELECT * FROM site_faq WHERE company_id=0 ORDER BY sort_order, id")
+        for r in template:
+            await conn.execute("""
+                INSERT INTO site_faq (company_id, question_ru, question_uz, answer_ru, answer_uz, sort_order)
+                VALUES ($1,$2,$3,$4,$5,$6)
+            """, company_id, r["question_ru"], r["question_uz"], r["answer_ru"], r["answer_uz"], r["sort_order"])
 
 
 # ── Отзывы на главной странице ───────────────────────────────────────────────
