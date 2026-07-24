@@ -10336,6 +10336,60 @@ async def saas_add_payment(company_id: int, body: dict = Body(...), _=Depends(ge
     return {"ok": True, "payment": dict(payment)}
 
 
+# ── SITE TEMPLATES & PALETTES (каталог дизайна сайта) ───────────────────────
+
+@app.get("/api/saas/site-templates")
+async def sa_get_site_templates(_=Depends(get_superadmin)):
+    rows = await db.get_site_templates()
+    return {"ok": True, "templates": rows}
+
+@app.post("/api/saas/site-templates")
+async def sa_create_site_template(body: dict = Body(...), _=Depends(get_superadmin)):
+    key = (body.get("key") or "").strip()
+    name_ru = (body.get("name_ru") or "").strip()
+    name_uz = (body.get("name_uz") or "").strip()
+    if not key or not name_ru or not name_uz:
+        raise HTTPException(400, "Укажите key, name_ru, name_uz")
+    row = await db.create_site_template(key, name_ru, name_uz, body.get("preview_url"), body.get("sort_order", 0))
+    return {"ok": True, "template": row}
+
+@app.patch("/api/saas/site-templates/{template_id}")
+async def sa_update_site_template(template_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    await db.update_site_template(template_id, body)
+    return {"ok": True}
+
+@app.delete("/api/saas/site-templates/{template_id}")
+async def sa_delete_site_template(template_id: int, _=Depends(get_superadmin)):
+    await db.delete_site_template(template_id)
+    return {"ok": True}
+
+@app.get("/api/saas/site-palettes")
+async def sa_get_site_palettes(_=Depends(get_superadmin)):
+    rows = await db.get_site_palettes()
+    return {"ok": True, "palettes": rows}
+
+@app.post("/api/saas/site-palettes")
+async def sa_create_site_palette(body: dict = Body(...), _=Depends(get_superadmin)):
+    key = (body.get("key") or "").strip()
+    name_ru = (body.get("name_ru") or "").strip()
+    name_uz = (body.get("name_uz") or "").strip()
+    colors = body.get("colors")
+    if not key or not name_ru or not name_uz or not isinstance(colors, dict):
+        raise HTTPException(400, "Укажите key, name_ru, name_uz, colors")
+    row = await db.create_site_palette(key, name_ru, name_uz, colors, body.get("sort_order", 0))
+    return {"ok": True, "palette": row}
+
+@app.patch("/api/saas/site-palettes/{palette_id}")
+async def sa_update_site_palette(palette_id: int, body: dict = Body(...), _=Depends(get_superadmin)):
+    await db.update_site_palette(palette_id, body)
+    return {"ok": True}
+
+@app.delete("/api/saas/site-palettes/{palette_id}")
+async def sa_delete_site_palette(palette_id: int, _=Depends(get_superadmin)):
+    await db.delete_site_palette(palette_id)
+    return {"ok": True}
+
+
 # ── TEMPLATE DEPARTMENTS & POSITIONS ─────────────────────────────────────────
 @app.get("/api/saas/template/departments")
 async def sa_get_template_depts(_=Depends(get_superadmin)):
@@ -10801,6 +10855,14 @@ async def sa_import_tg_messages(company_id: int, _=Depends(get_superadmin)):
     return {"ok": True}
 
 
+@app.get("/api/settings/site-design-catalog")
+async def public_site_design_catalog():
+    """Публичный каталог активных шаблонов/палитр — для превью в admin.html (iframe)."""
+    templates = await db.get_site_templates(active_only=True)
+    palettes = await db.get_site_palettes(active_only=True)
+    return {"templates": templates, "palettes": palettes}
+
+
 @app.get("/api/company/resolve")
 async def company_resolve(slug: str):
     """Публичный эндпоинт: slug → {name} для формы входа."""
@@ -10810,7 +10872,13 @@ async def company_resolve(slug: str):
     company = await db.get_company(company_id)
     if not company or not company.get("active"):
         raise HTTPException(status_code=404, detail="Компания не найдена или отключена")
-    return {"name": company["name"], "slug": company["slug"], "logo_url": company.get("logo_url")}
+    design = await db.get_company_public_design(company_id)
+    return {
+        "name": company["name"], "slug": company["slug"], "logo_url": company.get("logo_url"),
+        "site_template_key": (design or {}).get("site_template_key") or "template-01",
+        "site_palette_key":  (design or {}).get("site_palette_key") or "teal-amber",
+        "palette_colors":    (design or {}).get("colors") or None,
+    }
 
 
 @app.get("/api/company/info")
@@ -10861,6 +10929,39 @@ async def company_update_profile(req: CompanyProfileRequest, staff=Depends(get_c
     if not ok:
         raise HTTPException(status_code=400, detail="Этот slug уже занят другой компанией")
     return {"ok": True, **updates}
+
+
+@app.get("/api/admin/company/site-design")
+async def admin_get_site_design(staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    current = await db.get_company_site_design(company_id)
+    templates = await db.get_site_templates(active_only=True)
+    palettes = await db.get_site_palettes(active_only=True)
+    return {
+        "ok": True,
+        "site_template_key": (current or {}).get("site_template_key") or "template-01",
+        "site_palette_key":  (current or {}).get("site_palette_key") or "teal-amber",
+        "templates": templates,
+        "palettes": palettes,
+    }
+
+
+@app.put("/api/admin/company/site-design")
+async def admin_update_site_design(body: dict = Body(...), staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только admin")
+    company_id = staff.get("company_id") or 1
+    template_key = (body.get("site_template_key") or "").strip()
+    palette_key  = (body.get("site_palette_key") or "").strip()
+    if not template_key or not palette_key:
+        raise HTTPException(400, "Укажите site_template_key и site_palette_key")
+    try:
+        await db.update_company_site_design(company_id, template_key, palette_key)
+    except ValueError:
+        raise HTTPException(400, "Неизвестный или отключённый шаблон/палитра")
+    return {"ok": True}
 
 
 MAX_LOGO_BYTES = 400_000

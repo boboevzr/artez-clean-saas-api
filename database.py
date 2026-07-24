@@ -1,4 +1,5 @@
 import os
+import json
 import asyncpg
 import logging
 from datetime import datetime, timezone, timedelta
@@ -1939,6 +1940,89 @@ async def ensure_saas_schema():
     except Exception as e:
       logging.warning(f"⚠️ API: сид contact_email (step 41) не удался: {e}")
     logging.info("✅ API: contact_email seed (step 41) ready")
+
+    # ── Шаг 42: каталог шаблонов и палитр сайта (дизайн-система) ──────────
+    try:
+      async with pool.acquire() as c:
+        await c.execute("""
+            CREATE TABLE IF NOT EXISTS site_templates (
+                id          SERIAL PRIMARY KEY,
+                key         VARCHAR(50)  UNIQUE NOT NULL,
+                name_ru     VARCHAR(100) NOT NULL,
+                name_uz     VARCHAR(100) NOT NULL,
+                preview_url TEXT         DEFAULT NULL,
+                active      BOOLEAN      NOT NULL DEFAULT TRUE,
+                sort_order  INT          NOT NULL DEFAULT 0,
+                created_at  TIMESTAMPTZ  DEFAULT NOW()
+            );
+            CREATE TABLE IF NOT EXISTS site_palettes (
+                id          SERIAL PRIMARY KEY,
+                key         VARCHAR(50)  UNIQUE NOT NULL,
+                name_ru     VARCHAR(100) NOT NULL,
+                name_uz     VARCHAR(100) NOT NULL,
+                colors      JSONB        NOT NULL,
+                active      BOOLEAN      NOT NULL DEFAULT TRUE,
+                sort_order  INT          NOT NULL DEFAULT 0,
+                created_at  TIMESTAMPTZ  DEFAULT NOW()
+            );
+            ALTER TABLE companies ADD COLUMN IF NOT EXISTS site_template_key VARCHAR(50) NOT NULL DEFAULT 'template-01';
+            ALTER TABLE companies ADD COLUMN IF NOT EXISTS site_palette_key  VARCHAR(50) NOT NULL DEFAULT 'teal-amber';
+        """)
+
+        count_tpl = await c.fetchval("SELECT COUNT(*) FROM site_templates")
+        if count_tpl == 0:
+            await c.executemany("""
+                INSERT INTO site_templates (key, name_ru, name_uz, sort_order)
+                VALUES ($1, $2, $3, $4)
+            """, [
+                ("template-01", "Классика",   "Klassik",     1),
+                ("template-02", "Минимал",    "Minimal",     2),
+                ("template-03", "Модерн",     "Zamonaviy",   3),
+                ("template-04", "Карточки",   "Kartochkali", 4),
+            ])
+
+        count_pal = await c.fetchval("SELECT COUNT(*) FROM site_palettes")
+        if count_pal == 0:
+            await c.executemany("""
+                INSERT INTO site_palettes (key, name_ru, name_uz, colors, sort_order)
+                VALUES ($1, $2, $3, $4::jsonb, $5)
+            """, [
+                ("teal-amber",   "Тил и янтарь", "Tiniq va amber",
+                 json.dumps({"teal-deep":"#0E2D2A","teal":"#1A5C54","teal-soft":"#2CC6B3",
+                             "sand":"#F4EFE6","sand-card":"#FFFFFF","amber":"#E8A83C",
+                             "amber-deep":"#C98C24","ink":"#141E1B","ink-soft":"#5A6D68","line":"#E0D9CC"}), 1),
+                ("ocean-blue",   "Океан",        "Okean",
+                 json.dumps({"teal-deep":"#0B2540","teal":"#155E9E","teal-soft":"#4FB6E8",
+                             "sand":"#EEF3F8","sand-card":"#FFFFFF","amber":"#F2A93C",
+                             "amber-deep":"#D48B1E","ink":"#131C26","ink-soft":"#5A6B7A","line":"#DCE4EC"}), 2),
+                ("forest-green", "Лес",          "O'rmon",
+                 json.dumps({"teal-deep":"#12331E","teal":"#25703F","teal-soft":"#5FBE7C",
+                             "sand":"#F1F4EC","sand-card":"#FFFFFF","amber":"#E0A63A",
+                             "amber-deep":"#BD8720","ink":"#161F18","ink-soft":"#59685C","line":"#DEE4D6"}), 3),
+                ("burgundy-rose","Бургунди",     "Burgundiya",
+                 json.dumps({"teal-deep":"#3A0F1B","teal":"#7A1F35","teal-soft":"#D9718A",
+                             "sand":"#F7EEEF","sand-card":"#FFFFFF","amber":"#E8A83C",
+                             "amber-deep":"#C98C24","ink":"#241318","ink-soft":"#6E5A5F","line":"#E9DBDD"}), 4),
+                ("sunset-orange","Закат",        "Quyosh botishi",
+                 json.dumps({"teal-deep":"#3D1E0B","teal":"#B5541F","teal-soft":"#F2905A",
+                             "sand":"#FBF1E8","sand-card":"#FFFFFF","amber":"#F2C43C",
+                             "amber-deep":"#D4A31E","ink":"#241A11","ink-soft":"#6E625A","line":"#EDE0D2"}), 5),
+                ("violet-purple","Фиолет",       "Binafsha",
+                 json.dumps({"teal-deep":"#221240","teal":"#5B3A9E","teal-soft":"#9C7FDB",
+                             "sand":"#F2EEF9","sand-card":"#FFFFFF","amber":"#E8A83C",
+                             "amber-deep":"#C98C24","ink":"#1C1730","ink-soft":"#635C74","line":"#E2DBEE"}), 6),
+                ("slate-mono",   "Графит",       "Grafit",
+                 json.dumps({"teal-deep":"#1C1F22","teal":"#3E454B","teal-soft":"#8A949C",
+                             "sand":"#F2F2F0","sand-card":"#FFFFFF","amber":"#D9A441",
+                             "amber-deep":"#B8862A","ink":"#17191B","ink-soft":"#5C6267","line":"#DFE0DD"}), 7),
+                ("coral-teal",   "Коралл",       "Marjon",
+                 json.dumps({"teal-deep":"#0E2D2A","teal":"#1A5C54","teal-soft":"#2CC6B3",
+                             "sand":"#FBEEE9","sand-card":"#FFFFFF","amber":"#E86A3C",
+                             "amber-deep":"#C94F24","ink":"#141E1B","ink-soft":"#5A6D68","line":"#EBDAD2"}), 8),
+            ])
+      logging.info("✅ API: site_templates/site_palettes каталог готов (step 42)")
+    except Exception as e:
+      logging.warning(f"⚠️ API: миграция каталога шаблонов/палитр (step 42) не удалась: {e}")
 
 
 # ══════════════════════════════════════
@@ -8999,6 +9083,134 @@ async def update_saas_plan_pricing(plan_id: int, month: int, price: int):
             VALUES ($1, $2, $3)
             ON CONFLICT (plan_id, month) DO UPDATE SET price = EXCLUDED.price
         """, plan_id, month, price)
+
+
+async def get_site_templates(active_only: bool = False):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        q = "SELECT * FROM site_templates"
+        if active_only: q += " WHERE active=TRUE"
+        q += " ORDER BY sort_order, id"
+        return [dict(r) for r in await conn.fetch(q)]
+
+
+async def create_site_template(key: str, name_ru: str, name_uz: str, preview_url: str = None, sort_order: int = 0):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return dict(await conn.fetchrow("""
+            INSERT INTO site_templates (key, name_ru, name_uz, preview_url, sort_order)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+        """, key, name_ru, name_uz, preview_url, sort_order))
+
+
+async def update_site_template(template_id: int, updates: dict):
+    if not pool: return
+    allowed = {"name_ru", "name_uz", "preview_url", "active", "sort_order"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return
+    params = [template_id]
+    sets = []
+    for k, v in fields.items():
+        params.append(v)
+        sets.append(f"{k}=${len(params)}")
+    async with pool.acquire() as conn:
+        await conn.execute(f"UPDATE site_templates SET {', '.join(sets)} WHERE id=$1", *params)
+
+
+async def delete_site_template(template_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM site_templates WHERE id=$1", template_id)
+
+
+async def get_site_palettes(active_only: bool = False):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        q = "SELECT * FROM site_palettes"
+        if active_only: q += " WHERE active=TRUE"
+        q += " ORDER BY sort_order, id"
+        rows = [dict(r) for r in await conn.fetch(q)]
+        for r in rows:
+            if isinstance(r.get("colors"), str):
+                r["colors"] = json.loads(r["colors"])
+        return rows
+
+
+async def create_site_palette(key: str, name_ru: str, name_uz: str, colors: dict, sort_order: int = 0):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO site_palettes (key, name_ru, name_uz, colors, sort_order)
+            VALUES ($1, $2, $3, $4::jsonb, $5)
+            RETURNING *
+        """, key, name_ru, name_uz, json.dumps(colors), sort_order)
+        d = dict(row)
+        if isinstance(d.get("colors"), str): d["colors"] = json.loads(d["colors"])
+        return d
+
+
+async def update_site_palette(palette_id: int, updates: dict):
+    if not pool: return
+    allowed = {"name_ru", "name_uz", "colors", "active", "sort_order"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return
+    params = [palette_id]
+    sets = []
+    for k, v in fields.items():
+        if k == "colors":
+            v = json.dumps(v)
+            params.append(v)
+            sets.append(f"colors=${len(params)}::jsonb")
+        else:
+            params.append(v)
+            sets.append(f"{k}=${len(params)}")
+    async with pool.acquire() as conn:
+        await conn.execute(f"UPDATE site_palettes SET {', '.join(sets)} WHERE id=$1", *params)
+
+
+async def delete_site_palette(palette_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM site_palettes WHERE id=$1", palette_id)
+
+
+async def get_company_site_design(company_id: int):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT site_template_key, site_palette_key FROM companies WHERE id=$1", company_id
+        )
+
+
+async def get_company_public_design(company_id: int):
+    """Публичные данные для рендера сайта: ключ шаблона + цвета палитры (для index.html)."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT c.site_template_key, c.site_palette_key, p.colors
+            FROM companies c
+            LEFT JOIN site_palettes p ON p.key = c.site_palette_key
+            WHERE c.id = $1
+        """, company_id)
+        if not row: return None
+        d = dict(row)
+        if isinstance(d.get("colors"), str):
+            d["colors"] = json.loads(d["colors"])
+        return d
+
+
+async def update_company_site_design(company_id: int, template_key: str, palette_key: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        tpl_ok = await conn.fetchval("SELECT 1 FROM site_templates WHERE key=$1 AND active=TRUE", template_key)
+        pal_ok = await conn.fetchval("SELECT 1 FROM site_palettes WHERE key=$1 AND active=TRUE", palette_key)
+        if not tpl_ok or not pal_ok:
+            raise ValueError("unknown or inactive template/palette key")
+        await conn.execute(
+            "UPDATE companies SET site_template_key=$2, site_palette_key=$3 WHERE id=$1",
+            company_id, template_key, palette_key
+        )
 
 
 async def get_saas_subscription(company_id: int):
