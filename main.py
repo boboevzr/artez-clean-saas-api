@@ -7624,6 +7624,7 @@ SITE_SETTINGS_DEFAULTS = {
     # Контакты
     "contact_short":       "",
     "contact_main":        "",
+    "contact_email":       "",
     "contact_zarafshan_1":         "",
     "contact_zarafshan_2":         "",
     "contact_zarafshan_telegram":  "",
@@ -7729,7 +7730,7 @@ async def get_site_settings(company_slug: str = None):
     db.set_request_company(cid)
     PUBLIC_KEYS = [
         "social_instagram", "social_tg_bot", "social_tg_group",
-        "contact_short", "contact_main",
+        "contact_short", "contact_main", "contact_email",
         "contact_zarafshan_1", "contact_zarafshan_2", "contact_zarafshan_telegram", "contact_zarafshan_admin_tg", "contact_zarafshan_whatsapp", "contact_zarafshan_instagram",
         "contact_navoi_1", "contact_navoi_2", "contact_navoi_telegram", "contact_navoi_admin_tg", "contact_navoi_whatsapp", "contact_navoi_instagram",
         "yandex_maps_key",
@@ -7755,6 +7756,7 @@ class SiteSettings(BaseModel):
     social_tg_group:     str | None = None
     contact_short:       str | None = None
     contact_main:        str | None = None
+    contact_email:       str | None = None
     contact_zarafshan_1:        str | None = None
     contact_zarafshan_2:        str | None = None
     contact_zarafshan_telegram: str | None = None

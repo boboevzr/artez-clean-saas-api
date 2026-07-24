@@ -1928,6 +1928,18 @@ async def ensure_saas_schema():
       logging.warning(f"⚠️ API: заполнение шаблонов слайдер/статистика/отзывы/FAQ (step 40) не удалось: {e}")
     logging.info("✅ API: templates from company_id=1 (step 40) ready")
 
+    # ── Шаг 41: contact_email для company_id=1 (новое поле — иначе ARTEZ потеряет email на terms/privacy) ──
+    try:
+      async with pool.acquire() as c:
+        await c.execute("""
+            INSERT INTO config (key, value, company_id, updated_at)
+            VALUES ('contact_email', 'info@artez.uz', 1, NOW())
+            ON CONFLICT (company_id, key) DO NOTHING;
+        """)
+    except Exception as e:
+      logging.warning(f"⚠️ API: сид contact_email (step 41) не удался: {e}")
+    logging.info("✅ API: contact_email seed (step 41) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
