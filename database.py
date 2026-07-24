@@ -1772,6 +1772,90 @@ async def ensure_saas_schema():
             """)
     logging.info("✅ API: site_slides/site_stats (step 38) ready")
 
+    # ── Шаг 39: отзывы и FAQ на главной странице сайта ──
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS site_reviews (
+            id          SERIAL PRIMARY KEY,
+            company_id  INTEGER NOT NULL,
+            author_name VARCHAR(100) DEFAULT '',
+            rating      SMALLINT DEFAULT 5,
+            text_ru     TEXT DEFAULT '',
+            text_uz     TEXT DEFAULT '',
+            city_ru     VARCHAR(100) DEFAULT '',
+            city_uz     VARCHAR(100) DEFAULT '',
+            sort_order  INT DEFAULT 0,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_site_reviews_company ON site_reviews(company_id, sort_order);
+
+        CREATE TABLE IF NOT EXISTS site_faq (
+            id           SERIAL PRIMARY KEY,
+            company_id   INTEGER NOT NULL,
+            question_ru  VARCHAR(300) DEFAULT '',
+            question_uz  VARCHAR(300) DEFAULT '',
+            answer_ru    TEXT DEFAULT '',
+            answer_uz    TEXT DEFAULT '',
+            sort_order   INT DEFAULT 0,
+            created_at   TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_site_faq_company ON site_faq(company_id, sort_order);
+        """)
+        count_reviews = await c.fetchval("SELECT COUNT(*) FROM site_reviews WHERE company_id=1")
+        if count_reviews == 0:
+            await c.execute("""
+                INSERT INTO site_reviews (company_id, author_name, rating, text_ru, text_uz, city_ru, city_uz, sort_order) VALUES
+                (1, 'Малика Р.', 5,
+                 'Заказывала чистку ковра — приехали вовремя, забрали и через 3 дня привезли обратно. Ковёр стал как новый, пятно от кофе полностью исчезло. Очень довольна!',
+                 'Gilam tozalashni buyurtma qildim — o''z vaqtida kelishdi, olib ketishdi va 3 kundan so''ng qaytarib kelishdi. Gilam yangidek bo''ldi, qahva dog''i to''liq yo''qoldi. Juda mamnunman!',
+                 'г. Навои', 'Navoiy', 0),
+                (1, 'Бахром С.', 5,
+                 'Чистили диван — работали аккуратно, не оставили грязи. Запах полностью ушёл. Вывоз и доставка бесплатно — это очень удобно. Рекомендую всем!',
+                 'Divanni tozalashdi — ehtiyotkorlik bilan ishladilar, iflos qoldirmadilar. Hid to''liq yo''qoldi. Olib ketish va yetkazib berish bepul — bu juda qulay. Hammaga tavsiya qilaman!',
+                 'г. Зарафшан', 'Zarafshon', 1),
+                (1, 'Шахло Т.', 5,
+                 'Обратилась по поводу штор — думала дорого выйдет, но цены оказались очень разумные. Шторы почистили быстро, вернули в идеальном состоянии. Спасибо!',
+                 'Pardalar bo''yicha murojaat qildim — qimmat bo''ladi deb o''ylagandim, lekin narxlar juda maqbul bo''lib chiqdi. Pardalarni tez tozaladilar, mukammal holatda qaytardilar. Rahmat!',
+                 'г. Навои', 'Navoiy', 2),
+                (1, 'Акбар И.', 5,
+                 'Заказал чистку матраса и двух ковров. Мастера приехали со своим оборудованием, работали чисто и быстро. Теперь обращаюсь регулярно, раз в полгода.',
+                 'Matras va ikkita gilamni tozalashni buyurtma qildim. Ustalar o''z jihozlari bilan kelishdi, toza va tez ishladilar. Endi muntazam, olti oyda bir marta murojaat qilaman.',
+                 'г. Зарафшан', 'Zarafshon', 3),
+                (1, 'Нилуфар Х.', 5,
+                 'Очень профессиональная команда. Всё по-честному: замерили площадь при мне, объяснили стоимость. Ковры вернули в срок и даже упаковали в плёнку. Отлично!',
+                 'Juda professional jamoa. Hammasi halol: mening oldimda maydonni o''lchashdi, narxni tushuntirishdi. Gilamlarni o''z vaqtida qaytarishdi va hatto plyonkaga o''rashdi. Ajoyib!',
+                 'г. Навои', 'Navoiy', 4)
+                ON CONFLICT DO NOTHING;
+            """)
+        count_faq = await c.fetchval("SELECT COUNT(*) FROM site_faq WHERE company_id=1")
+        if count_faq == 0:
+            await c.execute("""
+                INSERT INTO site_faq (company_id, question_ru, question_uz, answer_ru, answer_uz, sort_order) VALUES
+                (1, 'Сколько времени занимает чистка?', 'Tozalash qancha vaqt oladi?',
+                 'Стандартная чистка ковра занимает 2–3 рабочих дня с момента вывоза. Экспресс-режим — 1 день. Диваны и матрасы чистятся на месте за 1–3 часа.',
+                 'Gilamni standart tozalash olib ketishdan 2–3 ish kunini oladi. Ekspress rejim — 1 kun. Divan va matraslar joyida 1–3 soat ichida tozalanadi.', 0),
+                (1, 'Вывоз и доставка действительно бесплатны?', 'Olib ketish va yetkazib berish haqiqatan ham bepulmi?',
+                 'Да, вывоз ковров и доставка обратно — полностью бесплатны. Вы платите только за саму чистку. Никаких скрытых платежей.',
+                 'Ha, gilamlarni olib ketish va qaytarib yetkazish — mutlaqo bepul. Siz faqat tozalash uchun to''laysiz. Hech qanday yashirin to''lovlar yo''q.', 1),
+                (1, 'Как оплатить? Принимаете безналично?', "Qanday to'lash mumkin? Naqdsiz to'lovni qabul qilasizmi?",
+                 'Принимаем наличные, банковский перевод и карту (Uzcard, Humo). Оплата — после получения готовой работы. Частичная предоплата тоже возможна по договорённости.',
+                 'Naqd pul, bank o''tkazmasi va karta (Uzcard, Humo) qabul qilamiz. To''lov — tayyor ishni olgandan keyin. Kelishuv bo''yicha qisman oldindan to''lov ham mumkin.', 2),
+                (1, 'Безопасна ли химия для детей и аллергиков?', 'Kimyoviy vositalar bolalar va allergiklarga xavfsizmi?',
+                 'Используем профессиональные гипоаллергенные средства — безопасны для детей и домашних животных. После чистки ковёр полностью просушивается перед возвратом.',
+                 'Professional gipoallergen vositalardan foydalanamiz — bolalar va uy hayvonlari uchun xavfsiz. Tozalashdan so''ng gilam qaytarilishidan oldin to''liq quritiladi.', 3),
+                (1, 'Работаете в моём городе?', 'Mening shahrimda ishlaymisiz?',
+                 'У нас два филиала: в Навои и Зарафшане. Также обслуживаем прилегающие районы — Учкудук, Тамди, Карманинский, Навбахорский и другие. Позвоните на 1221 — уточним.',
+                 "Bizning ikkita filialimiz bor: Navoiy va Zarafshonda. Shuningdek qo'shni tumanlarga — Uchquduq, Tomdi, Karmana, Navbahor va boshqalarga ham xizmat ko'rsatamiz. 1221 ga qo'ng'iroq qiling — aniqlaymiz.", 4)
+                ON CONFLICT DO NOTHING;
+            """)
+        await c.execute("""
+            INSERT INTO config (key, value, company_id, updated_at) VALUES
+            ('footer_about_ru', 'Химчистка ковров, мягкой мебели, матрасов и штор на дому в Навои и Зарафшане. Вывоз и доставка — бесплатно.', 1, NOW()),
+            ('footer_about_uz', 'Navoiy va Zarafshonda uyga gilam, yumshoq mebel, matras va pardalarni quruq tozalash xizmati. Olib ketish va yetkazib berish — bepul.', 1, NOW())
+            ON CONFLICT (company_id, key) DO NOTHING;
+        """)
+    logging.info("✅ API: site_reviews/site_faq (step 39) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -8630,6 +8714,93 @@ async def seed_company_site_stats(company_id: int):
             "INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES ($1,'','','',$2)",
             [(company_id, i) for i in range(4)]
         )
+
+
+# ── Отзывы на главной странице ───────────────────────────────────────────────
+async def get_site_reviews(company_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM site_reviews WHERE company_id=$1 ORDER BY sort_order, id", company_id)
+    return [dict(r) for r in rows]
+
+
+async def create_site_review(company_id: int, data: dict) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO site_reviews (company_id, author_name, rating, text_ru, text_uz, city_ru, city_uz, sort_order)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+        """, company_id, data.get("author_name", ""), data.get("rating", 5),
+             data.get("text_ru", ""), data.get("text_uz", ""),
+             data.get("city_ru", ""), data.get("city_uz", ""), data.get("sort_order", 0))
+    return dict(row) if row else None
+
+
+async def update_site_review(review_id: int, company_id: int, updates: dict) -> dict | None:
+    if not pool: return None
+    allowed = {"author_name", "rating", "text_ru", "text_uz", "city_ru", "city_uz", "sort_order"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return None
+    params = [review_id, company_id]
+    sets = []
+    for k, v in fields.items():
+        params.append(v)
+        sets.append(f"{k}=${len(params)}")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE site_reviews SET {', '.join(sets)} WHERE id=$1 AND company_id=$2 RETURNING *", *params)
+    return dict(row) if row else None
+
+
+async def delete_site_review(review_id: int, company_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM site_reviews WHERE id=$1 AND company_id=$2", review_id, company_id)
+    return res != "DELETE 0"
+
+
+# ── FAQ на главной странице ──────────────────────────────────────────────────
+async def get_site_faq(company_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM site_faq WHERE company_id=$1 ORDER BY sort_order, id", company_id)
+    return [dict(r) for r in rows]
+
+
+async def create_site_faq_item(company_id: int, data: dict) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO site_faq (company_id, question_ru, question_uz, answer_ru, answer_uz, sort_order)
+            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
+        """, company_id, data.get("question_ru", ""), data.get("question_uz", ""),
+             data.get("answer_ru", ""), data.get("answer_uz", ""), data.get("sort_order", 0))
+    return dict(row) if row else None
+
+
+async def update_site_faq_item(faq_id: int, company_id: int, updates: dict) -> dict | None:
+    if not pool: return None
+    allowed = {"question_ru", "question_uz", "answer_ru", "answer_uz", "sort_order"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return None
+    params = [faq_id, company_id]
+    sets = []
+    for k, v in fields.items():
+        params.append(v)
+        sets.append(f"{k}=${len(params)}")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE site_faq SET {', '.join(sets)} WHERE id=$1 AND company_id=$2 RETURNING *", *params)
+    return dict(row) if row else None
+
+
+async def delete_site_faq_item(faq_id: int, company_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM site_faq WHERE id=$1 AND company_id=$2", faq_id, company_id)
+    return res != "DELETE 0"
 
 
 # ══════════════════════════════════════

@@ -7695,6 +7695,9 @@ SITE_SETTINGS_DEFAULTS = {
     "receipt_header_text": "",
     "receipt_slogan":      "",
     "receipt_footer_note": "",
+    # "О компании" в футере сайта
+    "footer_about_ru": "",
+    "footer_about_uz": "",
 }
 
 async def _get_cfg(key: str) -> str:
@@ -7717,6 +7720,7 @@ async def get_site_settings(company_slug: str = None):
         "yandex_maps_key",
         "branch_zarafshan_location", "branch_navoi_location",
         "osago_partner_phone", "osago_partner_promo",
+        "footer_about_ru", "footer_about_uz",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -7779,6 +7783,8 @@ class SiteSettings(BaseModel):
     receipt_header_text: str | None = None
     receipt_slogan:      str | None = None
     receipt_footer_note: str | None = None
+    footer_about_ru:     str | None = None
+    footer_about_uz:     str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
@@ -10828,6 +10834,82 @@ async def get_site_stats_public(company_slug: str = None):
     """Публичная статистика для секции после автослайдера."""
     cid = await _resolve_client_company_id(company_slug)
     return {"ok": True, "stats": await db.get_site_stats(cid)}
+
+
+# ── Отзывы на главной странице ───────────────────────────────────────────────
+class SiteReviewIn(BaseModel):
+    author_name: str = ""
+    rating: int = 5
+    text_ru: str = ""
+    text_uz: str = ""
+    city_ru: str = ""
+    city_uz: str = ""
+    sort_order: int = 0
+
+@app.get("/api/admin/site-reviews")
+async def admin_list_site_reviews(cid: int = Depends(_get_admin_cid)):
+    return {"ok": True, "reviews": await db.get_site_reviews(cid)}
+
+@app.post("/api/admin/site-reviews")
+async def admin_create_site_review(data: SiteReviewIn, cid: int = Depends(_get_admin_cid)):
+    review = await db.create_site_review(cid, data.model_dump())
+    return {"ok": True, "review": review}
+
+@app.put("/api/admin/site-reviews/{review_id}")
+async def admin_update_site_review(review_id: int, data: SiteReviewIn, cid: int = Depends(_get_admin_cid)):
+    review = await db.update_site_review(review_id, cid, data.model_dump())
+    if not review:
+        raise HTTPException(status_code=404, detail="Отзыв не найден")
+    return {"ok": True, "review": review}
+
+@app.delete("/api/admin/site-reviews/{review_id}")
+async def admin_delete_site_review(review_id: int, cid: int = Depends(_get_admin_cid)):
+    ok = await db.delete_site_review(review_id, cid)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Отзыв не найден")
+    return {"ok": True}
+
+@app.get("/api/site-reviews")
+async def get_site_reviews_public(company_slug: str = None):
+    cid = await _resolve_client_company_id(company_slug)
+    return {"ok": True, "reviews": await db.get_site_reviews(cid)}
+
+
+# ── FAQ на главной странице ──────────────────────────────────────────────────
+class SiteFaqIn(BaseModel):
+    question_ru: str = ""
+    question_uz: str = ""
+    answer_ru: str = ""
+    answer_uz: str = ""
+    sort_order: int = 0
+
+@app.get("/api/admin/site-faq")
+async def admin_list_site_faq(cid: int = Depends(_get_admin_cid)):
+    return {"ok": True, "faq": await db.get_site_faq(cid)}
+
+@app.post("/api/admin/site-faq")
+async def admin_create_site_faq(data: SiteFaqIn, cid: int = Depends(_get_admin_cid)):
+    item = await db.create_site_faq_item(cid, data.model_dump())
+    return {"ok": True, "faq": item}
+
+@app.put("/api/admin/site-faq/{faq_id}")
+async def admin_update_site_faq(faq_id: int, data: SiteFaqIn, cid: int = Depends(_get_admin_cid)):
+    item = await db.update_site_faq_item(faq_id, cid, data.model_dump())
+    if not item:
+        raise HTTPException(status_code=404, detail="Вопрос не найден")
+    return {"ok": True, "faq": item}
+
+@app.delete("/api/admin/site-faq/{faq_id}")
+async def admin_delete_site_faq(faq_id: int, cid: int = Depends(_get_admin_cid)):
+    ok = await db.delete_site_faq_item(faq_id, cid)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Вопрос не найден")
+    return {"ok": True}
+
+@app.get("/api/site-faq")
+async def get_site_faq_public(company_slug: str = None):
+    cid = await _resolve_client_company_id(company_slug)
+    return {"ok": True, "faq": await db.get_site_faq(cid)}
 
 
 class CompanySocialRequest(BaseModel):
