@@ -10659,7 +10659,8 @@ class SiteSlideText(BaseModel):
     sort_order: int = 0
 
 class SiteStatIn(BaseModel):
-    value: str = ""
+    value_ru: str = ""
+    value_uz: str = ""
     label_ru: str = ""
     label_uz: str = ""
     sort_order: int = 0

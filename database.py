@@ -1730,7 +1730,8 @@ async def ensure_saas_schema():
         CREATE TABLE IF NOT EXISTS site_stats (
             id         SERIAL PRIMARY KEY,
             company_id INTEGER NOT NULL,
-            value      VARCHAR(50) DEFAULT '',
+            value_ru   VARCHAR(50) DEFAULT '',
+            value_uz   VARCHAR(50) DEFAULT '',
             label_ru   VARCHAR(200) DEFAULT '',
             label_uz   VARCHAR(200) DEFAULT '',
             sort_order INT DEFAULT 0,
@@ -1763,21 +1764,36 @@ async def ensure_saas_schema():
         count_stats = await c.fetchval("SELECT COUNT(*) FROM site_stats WHERE company_id=1")
         if count_stats == 0:
             await c.execute("""
-                INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES
-                (1, '500+', 'клиентов в год', 'yiliga mijozlar', 0),
-                (1, '3', 'года на рынке', 'yil bozorda', 1),
-                (1, '2 📍', 'города: Навои и Зарафшан', 'shahar: Navoiy va Zarafshon', 2),
-                (1, 'Бесплатно', 'вывоз и доставка', 'olib ketish va yetkazish', 3)
+                INSERT INTO site_stats (company_id, value_ru, value_uz, label_ru, label_uz, sort_order) VALUES
+                (1, '500+', '500+', 'клиентов в год', 'yiliga mijozlar', 0),
+                (1, '3', '3', 'года на рынке', 'yil bozorda', 1),
+                (1, '2 📍', '2 📍', 'города: Навои и Зарафшан', 'shahar: Navoiy va Zarafshon', 2),
+                (1, 'Бесплатно', 'Bepul', 'вывоз и доставка', 'olib ketish va yetkazish', 3)
                 ON CONFLICT DO NOTHING;
             """)
         count_stats_tpl = await c.fetchval("SELECT COUNT(*) FROM site_stats WHERE company_id=0")
         if count_stats_tpl == 0:
             await c.execute("""
-                INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES
-                (0, '', '', '', 0), (0, '', '', '', 1), (0, '', '', '', 2), (0, '', '', '', 3)
+                INSERT INTO site_stats (company_id, value_ru, value_uz, label_ru, label_uz, sort_order) VALUES
+                (0, '', '', '', '', 0), (0, '', '', '', '', 1), (0, '', '', '', '', 2), (0, '', '', '', '', 3)
                 ON CONFLICT DO NOTHING;
             """)
     logging.info("✅ API: site_slides/site_stats (step 38) ready")
+
+    # ── Шаг 38б: site_stats.value → value_ru/value_uz (значение тоже разное RU/UZ, напр. "Бесплатно"/"Bepul") ──
+    async with pool.acquire() as c:
+        await c.execute("ALTER TABLE site_stats ADD COLUMN IF NOT EXISTS value_ru VARCHAR(50) DEFAULT ''")
+        await c.execute("ALTER TABLE site_stats ADD COLUMN IF NOT EXISTS value_uz VARCHAR(50) DEFAULT ''")
+        has_old_value = await c.fetchval("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_name='site_stats' AND column_name='value')
+        """)
+        if has_old_value:
+            await c.execute("UPDATE site_stats SET value_ru = value WHERE value_ru = '' AND value <> ''")
+            await c.execute("UPDATE site_stats SET value_uz = value WHERE value_uz = '' AND value <> ''")
+            await c.execute("UPDATE site_stats SET value_uz = 'Bepul' WHERE value = 'Бесплатно'")
+            await c.execute("ALTER TABLE site_stats DROP COLUMN value")
+    logging.info("✅ API: site_stats value_ru/value_uz (step 38б) ready")
 
     # ── Шаг 39: отзывы и FAQ на главной странице сайта ──
     async with pool.acquire() as c:
@@ -1881,12 +1897,12 @@ async def ensure_saas_schema():
             logging.info("✅ API: шаблон site_slides заполнен из company_id=1")
 
         stats_filled0 = await c.fetchval(
-            "SELECT COUNT(*) FROM site_stats WHERE company_id=0 AND (value <> '' OR label_ru <> '')")
+            "SELECT COUNT(*) FROM site_stats WHERE company_id=0 AND (value_ru <> '' OR label_ru <> '')")
         if stats_filled0 == 0:
             await c.execute("DELETE FROM site_stats WHERE company_id=0")
             await c.execute("""
-                INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order)
-                SELECT 0, value, label_ru, label_uz, sort_order
+                INSERT INTO site_stats (company_id, value_ru, value_uz, label_ru, label_uz, sort_order)
+                SELECT 0, value_ru, value_uz, label_ru, label_uz, sort_order
                 FROM site_stats WHERE company_id=1
             """)
             logging.info("✅ API: шаблон site_stats заполнен из company_id=1")
@@ -8745,7 +8761,7 @@ async def get_site_stats(company_id: int) -> list:
 
 async def update_site_stat(stat_id: int, company_id: int, updates: dict) -> dict | None:
     if not pool: return None
-    allowed = {"value", "label_ru", "label_uz", "sort_order"}
+    allowed = {"value_ru", "value_uz", "label_ru", "label_uz", "sort_order"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields: return None
     params = [stat_id, company_id]
@@ -8768,15 +8784,15 @@ async def seed_company_site_stats(company_id: int):
         if count > 0:
             return
         template = await conn.fetch(
-            "SELECT value, label_ru, label_uz FROM site_stats WHERE company_id=0 ORDER BY sort_order, id LIMIT 4")
+            "SELECT value_ru, value_uz, label_ru, label_uz FROM site_stats WHERE company_id=0 ORDER BY sort_order, id LIMIT 4")
         if template:
             for i, r in enumerate(template):
                 await conn.execute(
-                    "INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES ($1,$2,$3,$4,$5)",
-                    company_id, r["value"], r["label_ru"], r["label_uz"], i)
+                    "INSERT INTO site_stats (company_id, value_ru, value_uz, label_ru, label_uz, sort_order) VALUES ($1,$2,$3,$4,$5,$6)",
+                    company_id, r["value_ru"], r["value_uz"], r["label_ru"], r["label_uz"], i)
         else:
             await conn.executemany(
-                "INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES ($1,'','','',$2)",
+                "INSERT INTO site_stats (company_id, value_ru, value_uz, label_ru, label_uz, sort_order) VALUES ($1,'','','','',$2)",
                 [(company_id, i) for i in range(4)]
             )
 
