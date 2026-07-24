@@ -1709,6 +1709,69 @@ async def ensure_saas_schema():
             logging.warning(f"⚠️ API: перенос site_contacts→branches (step 37) частично не удался: {e}")
     logging.info("✅ API: site_contacts→branches перенос (step 37) готов")
 
+    # ── Шаг 38: слайды автослайдера и статистика на главной странице сайта ──
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS site_slides (
+            id         SERIAL PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            image_url  TEXT NOT NULL DEFAULT '',
+            eyebrow_ru VARCHAR(100) DEFAULT '',
+            eyebrow_uz VARCHAR(100) DEFAULT '',
+            title_ru   VARCHAR(200) DEFAULT '',
+            title_uz   VARCHAR(200) DEFAULT '',
+            text_ru    TEXT DEFAULT '',
+            text_uz    TEXT DEFAULT '',
+            sort_order INT DEFAULT 0,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_site_slides_company ON site_slides(company_id, sort_order);
+
+        CREATE TABLE IF NOT EXISTS site_stats (
+            id         SERIAL PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            value      VARCHAR(50) DEFAULT '',
+            label_ru   VARCHAR(200) DEFAULT '',
+            label_uz   VARCHAR(200) DEFAULT '',
+            sort_order INT DEFAULT 0,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_site_stats_company ON site_stats(company_id, sort_order);
+        """)
+        # Засеять текущий (ARTEZ, company_id=1) контент — чтобы живой сайт не остался пустым
+        count_slides = await c.fetchval("SELECT COUNT(*) FROM site_slides WHERE company_id=1")
+        if count_slides == 0:
+            await c.execute("""
+                INSERT INTO site_slides (company_id, image_url, eyebrow_ru, eyebrow_uz, title_ru, title_uz, text_ru, text_uz, sort_order) VALUES
+                (1, 'https://images.unsplash.com/photo-1581578731548-c64695cc6952?q=80&w=1400&auto=format&fit=crop',
+                 'Услуга на дому', 'Uyga xizmat',
+                 'Чистим ковры у вас дома', 'Gilamlarni uyingizda tozalaymiz',
+                 'Приедем со своим оборудованием, почистим ковёр прямо в квартире — без вывоза и ожидания.',
+                 'O''z jihozlarimiz bilan kelib, gilamni uyingizda tozalaymiz — olib ketishsiz va kutishsiz.', 0),
+                (1, 'https://images.unsplash.com/photo-1493663284031-b7e3aefcae8e?q=80&w=1400&auto=format&fit=crop',
+                 'Без хлопот', 'Muammosiz',
+                 'Вывоз и доставка — бесплатно', 'Olib ketish va yetkazish — bepul',
+                 'Заберём ковры, диваны и шторы, почистим в мастерской и привезём обратно — вы ничего не платите за логистику.',
+                 'Gilam, divan va pardalarni olib ketamiz, ustaxonada tozalaymiz va qaytarib beramiz — logistika uchun to''lamaysiz.', 1),
+                (1, 'https://images.unsplash.com/photo-1567016432779-094069958ea5?q=80&w=1400&auto=format&fit=crop',
+                 'Мягкая мебель', 'Yumshoq mebel',
+                 'Диваны, кресла, матрасы — как новые', 'Divan, kreslo, matraslar — yangidek',
+                 'Глубокая чистка обивки от пятен, пыли и запахов с использованием профессиональной химии.',
+                 'Mato qoplamasini dog'', chang va hidlardan professional kimyo yordamida chuqur tozalash.', 2)
+                ON CONFLICT DO NOTHING;
+            """)
+        count_stats = await c.fetchval("SELECT COUNT(*) FROM site_stats WHERE company_id=1")
+        if count_stats == 0:
+            await c.execute("""
+                INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES
+                (1, '500+', 'клиентов в год', 'yiliga mijozlar', 0),
+                (1, '3', 'года на рынке', 'yil bozorda', 1),
+                (1, '2 📍', 'города: Навои и Зарафшан', 'shahar: Navoiy va Zarafshon', 2),
+                (1, 'Бесплатно', 'вывоз и доставка', 'olib ketish va yetkazish', 3)
+                ON CONFLICT DO NOTHING;
+            """)
+    logging.info("✅ API: site_slides/site_stats (step 38) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -8476,6 +8539,97 @@ async def delete_branch(branch_id: int, company_id: int) -> bool:
             "DELETE FROM branches WHERE id=$1 AND company_id=$2", branch_id, company_id
         )
         return result != "DELETE 0"
+
+
+# ══════════════════════════════════════
+#  ГЛАВНАЯ СТРАНИЦА САЙТА: слайдер + статистика
+# ══════════════════════════════════════
+async def get_site_slides(company_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM site_slides WHERE company_id=$1 ORDER BY sort_order, id", company_id)
+    return [dict(r) for r in rows]
+
+
+async def create_site_slide(company_id: int, image_url: str, eyebrow_ru: str, eyebrow_uz: str,
+                             title_ru: str, title_uz: str, text_ru: str, text_uz: str, sort_order: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO site_slides (company_id, image_url, eyebrow_ru, eyebrow_uz, title_ru, title_uz, text_ru, text_uz, sort_order)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
+        """, company_id, image_url, eyebrow_ru, eyebrow_uz, title_ru, title_uz, text_ru, text_uz, sort_order)
+    return dict(row) if row else None
+
+
+async def update_site_slide(slide_id: int, company_id: int, updates: dict) -> dict | None:
+    if not pool: return None
+    allowed = {"eyebrow_ru", "eyebrow_uz", "title_ru", "title_uz", "text_ru", "text_uz", "sort_order"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return None
+    params = [slide_id, company_id]
+    sets = []
+    for k, v in fields.items():
+        params.append(v)
+        sets.append(f"{k}=${len(params)}")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE site_slides SET {', '.join(sets)} WHERE id=$1 AND company_id=$2 RETURNING *", *params)
+    return dict(row) if row else None
+
+
+async def update_site_slide_image(slide_id: int, company_id: int, image_url: str) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE site_slides SET image_url=$1 WHERE id=$2 AND company_id=$3 RETURNING *",
+            image_url, slide_id, company_id)
+    return dict(row) if row else None
+
+
+async def delete_site_slide(slide_id: int, company_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM site_slides WHERE id=$1 AND company_id=$2", slide_id, company_id)
+    return res != "DELETE 0"
+
+
+async def get_site_stats(company_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM site_stats WHERE company_id=$1 ORDER BY sort_order, id", company_id)
+    return [dict(r) for r in rows]
+
+
+async def update_site_stat(stat_id: int, company_id: int, updates: dict) -> dict | None:
+    if not pool: return None
+    allowed = {"value", "label_ru", "label_uz", "sort_order"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields: return None
+    params = [stat_id, company_id]
+    sets = []
+    for k, v in fields.items():
+        params.append(v)
+        sets.append(f"{k}=${len(params)}")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE site_stats SET {', '.join(sets)} WHERE id=$1 AND company_id=$2 RETURNING *", *params)
+    return dict(row) if row else None
+
+
+async def seed_company_site_stats(company_id: int):
+    """Заводит 4 пустые карточки статистики для новой компании (фиксированная 4-колоночная сетка на сайте)."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM site_stats WHERE company_id=$1", company_id)
+        if count > 0:
+            return
+        await conn.executemany(
+            "INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order) VALUES ($1,'','','',$2)",
+            [(company_id, i) for i in range(4)]
+        )
 
 
 # ══════════════════════════════════════

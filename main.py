@@ -10073,6 +10073,7 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     await db.seed_company_tg_messages(company["id"])
     await db.seed_company_expense_categories(company["id"])
     await db.seed_company_chat_templates(company["id"])
+    await db.seed_company_site_stats(company["id"])
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
@@ -10730,6 +10731,103 @@ async def company_upload_logo(file: UploadFile = File(...), staff=Depends(get_cu
     logo_url = f"data:{file.content_type};base64,{base64.b64encode(data).decode('ascii')}"
     await db.update_company(company_id, {"logo_url": logo_url})
     return {"ok": True, "logo_url": logo_url}
+
+
+# ── Слайдер главной страницы (до 5 слайдов) ──────────────────────────────────
+MAX_SLIDE_IMAGE_BYTES = 1_500_000
+MAX_SLIDES_PER_COMPANY = 5
+
+class SiteSlideText(BaseModel):
+    eyebrow_ru: str = ""
+    eyebrow_uz: str = ""
+    title_ru: str = ""
+    title_uz: str = ""
+    text_ru: str = ""
+    text_uz: str = ""
+    sort_order: int = 0
+
+@app.get("/api/admin/site-slides")
+async def admin_list_site_slides(cid: int = Depends(_get_admin_cid)):
+    return {"ok": True, "slides": await db.get_site_slides(cid)}
+
+@app.post("/api/admin/site-slides")
+async def admin_create_site_slide(
+    file: UploadFile = File(...),
+    eyebrow_ru: str = Form(""), eyebrow_uz: str = Form(""),
+    title_ru: str = Form(""), title_uz: str = Form(""),
+    text_ru: str = Form(""), text_uz: str = Form(""),
+    sort_order: int = Form(0),
+    cid: int = Depends(_get_admin_cid),
+):
+    existing = await db.get_site_slides(cid)
+    if len(existing) >= MAX_SLIDES_PER_COMPANY:
+        raise HTTPException(status_code=400, detail=f"Достигнут лимит слайдов ({MAX_SLIDES_PER_COMPANY})")
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть изображением")
+    data = await file.read()
+    if len(data) > MAX_SLIDE_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail=f"Изображение слишком большое (макс. {MAX_SLIDE_IMAGE_BYTES//1000} КБ)")
+    image_url = f"data:{file.content_type};base64,{base64.b64encode(data).decode('ascii')}"
+    slide = await db.create_site_slide(cid, image_url, eyebrow_ru, eyebrow_uz, title_ru, title_uz, text_ru, text_uz, sort_order)
+    return {"ok": True, "slide": slide}
+
+@app.put("/api/admin/site-slides/{slide_id}")
+async def admin_update_site_slide(slide_id: int, data: SiteSlideText, cid: int = Depends(_get_admin_cid)):
+    slide = await db.update_site_slide(slide_id, cid, data.model_dump())
+    if not slide:
+        raise HTTPException(status_code=404, detail="Слайд не найден")
+    return {"ok": True, "slide": slide}
+
+@app.post("/api/admin/site-slides/{slide_id}/image")
+async def admin_update_site_slide_image(slide_id: int, file: UploadFile = File(...), cid: int = Depends(_get_admin_cid)):
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть изображением")
+    data = await file.read()
+    if len(data) > MAX_SLIDE_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail=f"Изображение слишком большое (макс. {MAX_SLIDE_IMAGE_BYTES//1000} КБ)")
+    image_url = f"data:{file.content_type};base64,{base64.b64encode(data).decode('ascii')}"
+    slide = await db.update_site_slide_image(slide_id, cid, image_url)
+    if not slide:
+        raise HTTPException(status_code=404, detail="Слайд не найден")
+    return {"ok": True, "slide": slide}
+
+@app.delete("/api/admin/site-slides/{slide_id}")
+async def admin_delete_site_slide(slide_id: int, cid: int = Depends(_get_admin_cid)):
+    ok = await db.delete_site_slide(slide_id, cid)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Слайд не найден")
+    return {"ok": True}
+
+@app.get("/api/site-slides")
+async def get_site_slides_public(company_slug: str = None):
+    """Публичный список слайдов для автослайдера на сайте."""
+    cid = await _resolve_client_company_id(company_slug)
+    return {"ok": True, "slides": await db.get_site_slides(cid)}
+
+
+# ── Статистика на главной странице (ровно 4 карточки — фиксированная сетка) ──
+class SiteStatIn(BaseModel):
+    value: str = ""
+    label_ru: str = ""
+    label_uz: str = ""
+    sort_order: int = 0
+
+@app.get("/api/admin/site-stats")
+async def admin_list_site_stats(cid: int = Depends(_get_admin_cid)):
+    return {"ok": True, "stats": await db.get_site_stats(cid)}
+
+@app.put("/api/admin/site-stats/{stat_id}")
+async def admin_update_site_stat(stat_id: int, data: SiteStatIn, cid: int = Depends(_get_admin_cid)):
+    stat = await db.update_site_stat(stat_id, cid, data.model_dump())
+    if not stat:
+        raise HTTPException(status_code=404, detail="Не найдено")
+    return {"ok": True, "stat": stat}
+
+@app.get("/api/site-stats")
+async def get_site_stats_public(company_slug: str = None):
+    """Публичная статистика для секции после автослайдера."""
+    cid = await _resolve_client_company_id(company_slug)
+    return {"ok": True, "stats": await db.get_site_stats(cid)}
 
 
 class CompanySocialRequest(BaseModel):
