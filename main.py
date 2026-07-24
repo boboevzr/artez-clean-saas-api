@@ -7698,6 +7698,21 @@ SITE_SETTINGS_DEFAULTS = {
     # "О компании" в футере сайта
     "footer_about_ru": "",
     "footer_about_uz": "",
+    # Секция "Стать агентом" на главной (card1 = % берётся из agent_commission_*, не дублируется)
+    "agent_title_ru": "Станьте нашим агентом",
+    "agent_title_uz": "Bizning agentimiz bo'ling",
+    "agent_text_ru": "Рекомендуйте наши услуги и получайте вознаграждение за каждый заказ. Без вложений, без опыта — только ваша сеть знакомых.",
+    "agent_text_uz": "Xizmatlarimizni tavsiya qiling va har bir buyurtma uchun mukofot oling. Sarmoyasiz, tajribasiz — faqat sizning tanishlaringiz doirasi.",
+    "agent_card2_value":    "CRM",
+    "agent_card2_label_ru": "личный кабинет",
+    "agent_card2_label_uz": "shaxsiy kabinet",
+    "agent_card3_value":    "∞",
+    "agent_card3_label_ru": "без лимита",
+    "agent_card3_label_uz": "cheklovsiz",
+    "agent_cta_text_ru":       "🤝 Стать агентом",
+    "agent_cta_text_uz":       "🤝 Agent bo'lish",
+    "agent_learnmore_text_ru": "Подробнее о программе",
+    "agent_learnmore_text_uz": "Dastur haqida batafsil",
 }
 
 async def _get_cfg(key: str) -> str:
@@ -7721,6 +7736,12 @@ async def get_site_settings(company_slug: str = None):
         "branch_zarafshan_location", "branch_navoi_location",
         "osago_partner_phone", "osago_partner_promo",
         "footer_about_ru", "footer_about_uz",
+        "agent_commission_type", "agent_commission_percent", "agent_commission_fixed",
+        "agent_title_ru", "agent_title_uz", "agent_text_ru", "agent_text_uz",
+        "agent_card2_value", "agent_card2_label_ru", "agent_card2_label_uz",
+        "agent_card3_value", "agent_card3_label_ru", "agent_card3_label_uz",
+        "agent_cta_text_ru", "agent_cta_text_uz",
+        "agent_learnmore_text_ru", "agent_learnmore_text_uz",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -7785,6 +7806,20 @@ class SiteSettings(BaseModel):
     receipt_footer_note: str | None = None
     footer_about_ru:     str | None = None
     footer_about_uz:     str | None = None
+    agent_title_ru:          str | None = None
+    agent_title_uz:          str | None = None
+    agent_text_ru:           str | None = None
+    agent_text_uz:           str | None = None
+    agent_card2_value:       str | None = None
+    agent_card2_label_ru:    str | None = None
+    agent_card2_label_uz:    str | None = None
+    agent_card3_value:       str | None = None
+    agent_card3_label_ru:    str | None = None
+    agent_card3_label_uz:    str | None = None
+    agent_cta_text_ru:       str | None = None
+    agent_cta_text_uz:       str | None = None
+    agent_learnmore_text_ru: str | None = None
+    agent_learnmore_text_uz: str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
