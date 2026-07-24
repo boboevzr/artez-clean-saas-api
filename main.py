@@ -10611,6 +10611,40 @@ async def sa_import_chat_tpls(company_id: int, _=Depends(get_superadmin)):
     return {"ok": True}
 
 
+MAX_SLIDE_IMAGE_BYTES = 1_500_000
+MAX_SLIDES_PER_COMPANY = 5
+
+class SiteSlideText(BaseModel):
+    eyebrow_ru: str = ""
+    eyebrow_uz: str = ""
+    title_ru: str = ""
+    title_uz: str = ""
+    text_ru: str = ""
+    text_uz: str = ""
+    sort_order: int = 0
+
+class SiteStatIn(BaseModel):
+    value: str = ""
+    label_ru: str = ""
+    label_uz: str = ""
+    sort_order: int = 0
+
+class SiteReviewIn(BaseModel):
+    author_name: str = ""
+    rating: int = 5
+    text_ru: str = ""
+    text_uz: str = ""
+    city_ru: str = ""
+    city_uz: str = ""
+    sort_order: int = 0
+
+class SiteFaqIn(BaseModel):
+    question_ru: str = ""
+    question_uz: str = ""
+    answer_ru: str = ""
+    answer_uz: str = ""
+    sort_order: int = 0
+
 # ── Superadmin: шаблоны слайдера/статистики/отзывов/FAQ (company_id=0) ──────
 
 @app.get("/api/saas/catalog/site-slides")
@@ -10876,17 +10910,6 @@ async def company_upload_logo(file: UploadFile = File(...), staff=Depends(get_cu
 
 
 # ── Слайдер главной страницы (до 5 слайдов) ──────────────────────────────────
-MAX_SLIDE_IMAGE_BYTES = 1_500_000
-MAX_SLIDES_PER_COMPANY = 5
-
-class SiteSlideText(BaseModel):
-    eyebrow_ru: str = ""
-    eyebrow_uz: str = ""
-    title_ru: str = ""
-    title_uz: str = ""
-    text_ru: str = ""
-    text_uz: str = ""
-    sort_order: int = 0
 
 @app.get("/api/admin/site-slides")
 async def admin_list_site_slides(cid: int = Depends(_get_admin_cid)):
@@ -10948,12 +10971,6 @@ async def get_site_slides_public(company_slug: str = None):
 
 
 # ── Статистика на главной странице (ровно 4 карточки — фиксированная сетка) ──
-class SiteStatIn(BaseModel):
-    value: str = ""
-    label_ru: str = ""
-    label_uz: str = ""
-    sort_order: int = 0
-
 @app.get("/api/admin/site-stats")
 async def admin_list_site_stats(cid: int = Depends(_get_admin_cid)):
     return {"ok": True, "stats": await db.get_site_stats(cid)}
@@ -10973,15 +10990,6 @@ async def get_site_stats_public(company_slug: str = None):
 
 
 # ── Отзывы на главной странице ───────────────────────────────────────────────
-class SiteReviewIn(BaseModel):
-    author_name: str = ""
-    rating: int = 5
-    text_ru: str = ""
-    text_uz: str = ""
-    city_ru: str = ""
-    city_uz: str = ""
-    sort_order: int = 0
-
 @app.get("/api/admin/site-reviews")
 async def admin_list_site_reviews(cid: int = Depends(_get_admin_cid)):
     return {"ok": True, "reviews": await db.get_site_reviews(cid)}
@@ -11012,13 +11020,6 @@ async def get_site_reviews_public(company_slug: str = None):
 
 
 # ── FAQ на главной странице ──────────────────────────────────────────────────
-class SiteFaqIn(BaseModel):
-    question_ru: str = ""
-    question_uz: str = ""
-    answer_ru: str = ""
-    answer_uz: str = ""
-    sort_order: int = 0
-
 @app.get("/api/admin/site-faq")
 async def admin_list_site_faq(cid: int = Depends(_get_admin_cid)):
     return {"ok": True, "faq": await db.get_site_faq(cid)}
