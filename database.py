@@ -1867,6 +1867,51 @@ async def ensure_saas_schema():
       logging.warning(f"⚠️ API: сид отзывов/FAQ (step 39) не удался: {e}")
     logging.info("✅ API: site_reviews/site_faq (step 39) ready")
 
+    # ── Шаг 40: заполнить шаблоны (company_id=0) слайдера/статистики/отзывов/FAQ
+    #            реальными данными компании 1 — суперадминский каталог был пуст ──
+    try:
+      async with pool.acquire() as c:
+        count_slides0 = await c.fetchval("SELECT COUNT(*) FROM site_slides WHERE company_id=0")
+        if count_slides0 == 0:
+            await c.execute("""
+                INSERT INTO site_slides (company_id, image_url, eyebrow_ru, eyebrow_uz, title_ru, title_uz, text_ru, text_uz, sort_order)
+                SELECT 0, image_url, eyebrow_ru, eyebrow_uz, title_ru, title_uz, text_ru, text_uz, sort_order
+                FROM site_slides WHERE company_id=1
+            """)
+            logging.info("✅ API: шаблон site_slides заполнен из company_id=1")
+
+        stats_filled0 = await c.fetchval(
+            "SELECT COUNT(*) FROM site_stats WHERE company_id=0 AND (value <> '' OR label_ru <> '')")
+        if stats_filled0 == 0:
+            await c.execute("DELETE FROM site_stats WHERE company_id=0")
+            await c.execute("""
+                INSERT INTO site_stats (company_id, value, label_ru, label_uz, sort_order)
+                SELECT 0, value, label_ru, label_uz, sort_order
+                FROM site_stats WHERE company_id=1
+            """)
+            logging.info("✅ API: шаблон site_stats заполнен из company_id=1")
+
+        count_reviews0 = await c.fetchval("SELECT COUNT(*) FROM site_reviews WHERE company_id=0")
+        if count_reviews0 == 0:
+            await c.execute("""
+                INSERT INTO site_reviews (company_id, author_name, rating, text_ru, text_uz, city_ru, city_uz, sort_order)
+                SELECT 0, author_name, rating, text_ru, text_uz, city_ru, city_uz, sort_order
+                FROM site_reviews WHERE company_id=1
+            """)
+            logging.info("✅ API: шаблон site_reviews заполнен из company_id=1")
+
+        count_faq0 = await c.fetchval("SELECT COUNT(*) FROM site_faq WHERE company_id=0")
+        if count_faq0 == 0:
+            await c.execute("""
+                INSERT INTO site_faq (company_id, question_ru, question_uz, answer_ru, answer_uz, sort_order)
+                SELECT 0, question_ru, question_uz, answer_ru, answer_uz, sort_order
+                FROM site_faq WHERE company_id=1
+            """)
+            logging.info("✅ API: шаблон site_faq заполнен из company_id=1")
+    except Exception as e:
+      logging.warning(f"⚠️ API: заполнение шаблонов слайдер/статистика/отзывы/FAQ (step 40) не удалось: {e}")
+    logging.info("✅ API: templates from company_id=1 (step 40) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
