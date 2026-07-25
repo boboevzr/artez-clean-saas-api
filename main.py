@@ -10102,6 +10102,21 @@ class PublicRegisterRequest(BaseModel):
     contact_email: str | None = None
     admin_password: str
 
+_CHECK_FIELD_MAP = {
+    "company_name": "name", "slug": "slug", "contact_name": "contact_name",
+    "phone": "contact_phone", "email": "contact_email",
+}
+
+@app.get("/api/saas/check-availability")
+async def public_check_availability(field: str, value: str):
+    """Живая проверка на дубликат при заполнении формы регистрации (cleano.uz)."""
+    column = _CHECK_FIELD_MAP.get(field)
+    if not column or not value.strip():
+        return {"ok": True, "exists": False}
+    exists = await db.check_company_field_exists(column, value.strip())
+    return {"ok": True, "exists": exists}
+
+
 @app.post("/api/saas/register")
 async def public_register_company(req: PublicRegisterRequest):
     """Самостоятельная регистрация компании с лендинга cleano.uz — создаёт триал на 14 дней."""
@@ -10115,6 +10130,17 @@ async def public_register_company(req: PublicRegisterRequest):
         raise HTTPException(status_code=400, detail="Укажите телефон")
     if len(req.admin_password) < 6:
         raise HTTPException(status_code=400, detail="Пароль должен быть не короче 6 символов")
+
+    if await db.check_company_field_exists("name", name):
+        raise HTTPException(status_code=409, detail="Компания с таким названием уже зарегистрирована")
+    if await db.check_company_field_exists("slug", slug):
+        raise HTTPException(status_code=409, detail="Такой адрес уже занят, выберите другой")
+    if await db.check_company_field_exists("contact_phone", req.contact_phone):
+        raise HTTPException(status_code=409, detail="Этот телефон уже зарегистрирован")
+    if req.contact_email and await db.check_company_field_exists("contact_email", req.contact_email):
+        raise HTTPException(status_code=409, detail="Этот email уже зарегистрирован")
+    if req.contact_name.strip() and await db.check_company_field_exists("contact_name", req.contact_name):
+        raise HTTPException(status_code=409, detail="Это имя уже используется в другой регистрации")
 
     company, credentials, secret_key = await _provision_company(
         name, slug, "starter", 1, 10, admin_password=req.admin_password)

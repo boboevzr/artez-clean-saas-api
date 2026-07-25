@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncpg
 import logging
@@ -9061,6 +9062,27 @@ async def delete_site_faq_item(faq_id: int, company_id: int) -> bool:
 # ══════════════════════════════════════
 #  SAAS PLANS / SUBSCRIPTIONS / PAYMENTS
 # ══════════════════════════════════════
+
+async def check_company_field_exists(column: str, value: str) -> bool:
+    """Проверка на дубликат перед регистрацией (публичная форма cleano.uz).
+    column — строго из белого списка, никогда не из пользовательского ввода напрямую."""
+    if not pool: return False
+    allowed_cols = {"name", "slug", "contact_name", "contact_phone", "contact_email"}
+    if column not in allowed_cols or not value.strip():
+        return False
+    async with pool.acquire() as conn:
+        if column == "contact_phone":
+            digits = re.sub(r"\D", "", value)
+            if not digits:
+                return False
+            row = await conn.fetchval(
+                "SELECT 1 FROM companies WHERE regexp_replace(contact_phone, '\\D', '', 'g') = $1 "
+                "AND contact_phone IS NOT NULL AND contact_phone <> '' LIMIT 1", digits)
+        else:
+            row = await conn.fetchval(
+                f"SELECT 1 FROM companies WHERE lower({column}) = lower($1) LIMIT 1", value.strip())
+        return bool(row)
+
 
 async def get_saas_plan_by_slug(slug: str):
     if not pool: return None
