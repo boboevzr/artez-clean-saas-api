@@ -9067,7 +9067,7 @@ async def check_company_field_exists(column: str, value: str) -> bool:
     """Проверка на дубликат перед регистрацией (публичная форма cleano.uz).
     column — строго из белого списка, никогда не из пользовательского ввода напрямую."""
     if not pool: return False
-    allowed_cols = {"name", "slug", "contact_name", "contact_phone", "contact_email"}
+    allowed_cols = {"name", "slug", "contact_phone", "contact_email"}
     if column not in allowed_cols or not value.strip():
         return False
     async with pool.acquire() as conn:

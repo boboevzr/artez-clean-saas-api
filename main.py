@@ -10103,7 +10103,7 @@ class PublicRegisterRequest(BaseModel):
     admin_password: str
 
 _CHECK_FIELD_MAP = {
-    "company_name": "name", "slug": "slug", "contact_name": "contact_name",
+    "company_name": "name", "slug": "slug",
     "phone": "contact_phone", "email": "contact_email",
 }
 
@@ -10139,8 +10139,6 @@ async def public_register_company(req: PublicRegisterRequest):
         raise HTTPException(status_code=409, detail="Этот телефон уже зарегистрирован")
     if req.contact_email and await db.check_company_field_exists("contact_email", req.contact_email):
         raise HTTPException(status_code=409, detail="Этот email уже зарегистрирован")
-    if req.contact_name.strip() and await db.check_company_field_exists("contact_name", req.contact_name):
-        raise HTTPException(status_code=409, detail="Это имя уже используется в другой регистрации")
 
     company, credentials, secret_key = await _provision_company(
         name, slug, "starter", 1, 10, admin_password=req.admin_password)
