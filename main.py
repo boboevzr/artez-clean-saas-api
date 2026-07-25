@@ -233,7 +233,7 @@ async def _sms_dispatch_worker():
             for dispatch in pending:
                 import json as _j2
                 phones = _j2.loads(dispatch["phones"]) if isinstance(dispatch["phones"], str) else dispatch["phones"]
-                frm    = dispatch["from_nick"] or "ARTEZ"
+                frm    = dispatch["from_nick"] or "4546"
                 msg    = dispatch["message"]
                 token  = await _eskiz_get_token()
                 sent   = 0
@@ -9376,14 +9376,14 @@ async def ad_ivr_delete(iid: int, cid: int = Depends(_get_admin_cid)):
 @app.get("/api/admin/sms/settings")
 async def sms_settings_get(_=Depends(_get_admin)):
     token = await db.get_config("eskiz_token") or ""
-    frm   = await db.get_config("eskiz_from") or "ARTEZ"
+    frm   = await db.get_config("eskiz_from") or "4546"
     return {"token": token, "from": frm}
 
 @app.post("/api/admin/sms/settings")
 async def sms_settings_save(body: dict = Body(...), _=Depends(_get_admin)):
     global _eskiz_token
     token = (body.get("token") or "").strip()
-    frm   = (body.get("from") or "ARTEZ").strip()
+    frm   = (body.get("from") or "4546").strip()
     if token:
         await db.set_config("eskiz_token", token)
         _eskiz_token = token
@@ -9678,7 +9678,7 @@ async def sms_send_admin(body: dict = Body(...), _=Depends(_get_admin)):
         raise HTTPException(400, "phone и message обязательны")
     if not phone.startswith("998"):
         phone = "998" + phone
-    frm = (body.get("nick") or "").strip() or await db.get_config("eskiz_from") or "ARTEZ"
+    frm = (body.get("nick") or "").strip() or await db.get_config("eskiz_from") or "4546"
     async with aiohttp.ClientSession() as s:
         r = await s.post(
             "https://notify.eskiz.uz/api/message/sms/send",
@@ -9701,7 +9701,7 @@ async def sms_send_group(body: dict = Body(...), cid: int = Depends(_get_admin_c
     schedule_time = (body.get("schedule_time") or "").strip()  # "YYYY-MM-DD HH:MM"
     if not gid or not message:
         raise HTTPException(400, "group_id и message обязательны")
-    frm = (body.get("nick") or "").strip() or await db.get_config("eskiz_from") or "ARTEZ"
+    frm = (body.get("nick") or "").strip() or await db.get_config("eskiz_from") or "4546"
 
     async with db.pool.acquire() as conn:
         if not await conn.fetchrow("SELECT id FROM sms_groups WHERE id=$1 AND company_id=$2", gid, cid):
