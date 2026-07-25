@@ -10531,6 +10531,71 @@ async def cleano_phone_verify_confirm_sms(req: CleanoSmsConfirmRequest):
     return {"ok": True}
 
 
+# ══════════════════════════════════════
+#  ДЕМО-ВИДЕО НА ЛЕНДИНГЕ CLEANO.UZ (отдельно RU/UZ)
+#  Хранится в Telegram-канале (тот же MEDIA_CHANNEL_ID, что и остальные медиа) —
+#  в config сохраняется только file_id. Раздача публичная — файл ПРОКСИРУЕТСЯ
+#  через бэкенд (не редиректом на api.telegram.org), чтобы BOT_TOKEN не утекал клиенту.
+# ══════════════════════════════════════
+MAX_CLEANO_VIDEO_BYTES = 19_000_000  # запас под лимит Telegram getFile (20 МБ)
+
+@app.post("/api/saas/cleano-demo-video/{lang}")
+async def sa_upload_cleano_demo_video(lang: str, file: UploadFile = File(...), _=Depends(get_superadmin)):
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=400, detail="lang должен быть ru или uz")
+    if not (file.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть видео")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_CLEANO_VIDEO_BYTES:
+        raise HTTPException(status_code=400, detail=f"Видео слишком большое (макс. {MAX_CLEANO_VIDEO_BYTES//1_000_000} МБ)")
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field("video", file_bytes, filename=file.filename or f"cleano-demo-{lang}.mp4", content_type=file.content_type)
+    form.add_field("caption", f"Cleano demo video ({lang})")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=form,
+                           timeout=aiohttp.ClientTimeout(total=60)) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+    file_id = result["result"]["video"]["file_id"]
+    await db.set_config(f"cleano_demo_video_{lang}", file_id)
+    return {"ok": True}
+
+
+@app.get("/api/saas/cleano-demo-video-status")
+async def sa_cleano_demo_video_status(_=Depends(get_superadmin)):
+    ru = await db.get_config("cleano_demo_video_ru")
+    uz = await db.get_config("cleano_demo_video_uz")
+    return {"ok": True, "ru": bool(ru), "uz": bool(uz)}
+
+
+@app.get("/api/cleano/demo-video/{lang}")
+async def public_cleano_demo_video(lang: str):
+    """Публичная раздача демо-видео для лендинга cleano.uz — без авторизации."""
+    from fastapi.responses import StreamingResponse
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=404)
+    file_id = await db.get_config(f"cleano_demo_video_{lang}")
+    if not file_id or not BOT_TOKEN:
+        raise HTTPException(status_code=404, detail="Видео не загружено")
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                          params={"file_id": file_id}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            data = await r.json()
+        if not data.get("ok"):
+            raise HTTPException(status_code=502, detail="Файл не найден в Telegram")
+        file_path = data["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=60)) as fr:
+            content = await fr.read()
+    return StreamingResponse(iter([content]), media_type="video/mp4",
+                              headers={"Cache-Control": "public, max-age=3600", "Content-Disposition": "inline"})
+
+
 # ── SAAS PLANS ──────────────────────────────────────────────────────────────
 
 @app.get("/api/saas/plans")
