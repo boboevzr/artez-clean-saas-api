@@ -4740,8 +4740,10 @@ async def upload_order_photo(
     return {"ok": True, "photo": photo}
 
 @app.delete("/api/admin/orders/{order_id}/photos/{photo_id}")
-async def delete_order_photo(order_id: int, photo_id: int, _=Depends(get_current_staff)):
-    await db.delete_order_photo(photo_id)
+async def delete_order_photo(order_id: int, photo_id: int, staff=Depends(get_current_staff)):
+    ok = await db.delete_order_photo(photo_id, staff.get("company_id") or 1)
+    if not ok:
+        raise HTTPException(status_code=404)
     return {"ok": True}
 
 # ── Платежи заказа ────────────────────────────────────────────────────────────
@@ -6347,11 +6349,11 @@ async def serve_order_photo(
     if not token:
         raise HTTPException(status_code=401)
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         raise HTTPException(status_code=401)
 
-    row = await db.get_photo_by_id(photo_id)
+    row = await db.get_photo_by_id(photo_id, payload.get("company_id") or 1)
     if not row:
         raise HTTPException(status_code=404)
 
@@ -6375,11 +6377,11 @@ async def serve_item_media(
     if not token:
         raise HTTPException(status_code=401)
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         raise HTTPException(status_code=401)
 
-    row = await db.get_item_media_by_id(media_id)
+    row = await db.get_item_media_by_id(media_id, payload.get("company_id") or 1)
     if not row:
         raise HTTPException(status_code=404)
 
@@ -6749,9 +6751,12 @@ async def upload_item_media(
 
 @app.delete("/api/admin/orders/{order_id}/items/{item_id}/media/{media_id}")
 async def delete_item_media(order_id: int, item_id: int, media_id: int, staff=Depends(get_current_staff)):
+    cid = staff.get("company_id") or 1
     # Fetch media type and item service before deleting
-    media_row = await db.get_item_media_by_id(media_id)
-    await db.delete_item_media(media_id)
+    media_row = await db.get_item_media_by_id(media_id, cid)
+    if not media_row:
+        raise HTTPException(status_code=404)
+    await db.delete_item_media(media_id, cid)
     sname = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','?')
     item_service = ''; item_pos3 = None
     if db.pool:
@@ -7193,9 +7198,11 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
     ]}
     # Все approvers (с или без tg_id)
     async with db.pool.acquire() as conn:
-        all_approvers = await conn.fetch(
-            "SELECT id, first_name, last_name, tg_id FROM staff "
-            "WHERE can_approve_debt=TRUE AND active=TRUE")
+        all_approvers = await conn.fetch("""
+            SELECT s.id, s.first_name, s.last_name, s.tg_id FROM staff s
+            JOIN orders o ON o.company_id = s.company_id
+            WHERE s.can_approve_debt=TRUE AND s.active=TRUE AND o.id=$1
+        """, order_id)
     mgr_msgs = {}
     if BOT_TOKEN:
         async with aiohttp.ClientSession() as _s:
@@ -7255,6 +7262,13 @@ async def push_debt_approval_managers_ep(
 ):
     if not BOT_TOKEN or bot_token_check != BOT_TOKEN:
         raise HTTPException(403, "Forbidden")
+    # Вызывается ботом (не через staff JWT) — company_id_middleware не может его выставить
+    # из токена, поэтому резолвим компанию по заказу явно перед scoped-запросом approvers.
+    if db.pool:
+        async with db.pool.acquire() as _c:
+            order_cid = await _c.fetchval("SELECT company_id FROM orders WHERE order_num=$1", order_num)
+        if order_cid:
+            db.set_request_company(order_cid)
     approvers = await db.get_debt_approvers()
     title = "❗ Закрытие в долг"
     body_txt = f"Заказ {order_num} · долг {int(debt_amount):,} с"
@@ -7305,7 +7319,11 @@ async def _notify_debt_result(order_id: int, order_num: str, driver_tg_id, resul
             logging.warning(f"_notify_debt_result driver push: {_e}")
     try:
         async with db.pool.acquire() as _c:
-            approvers = await _c.fetch("SELECT id FROM staff WHERE can_approve_debt=TRUE AND active=TRUE")
+            approvers = await _c.fetch("""
+                SELECT s.id FROM staff s
+                JOIN orders o ON o.company_id = s.company_id
+                WHERE s.can_approve_debt=TRUE AND s.active=TRUE AND o.id=$1
+            """, order_id)
         for mgr in approvers:
             await send_web_push(mgr["id"], title_mgr, body_mgr, push_type=push_type, order_id=order_id,
                                 driver_staff_id=drv_staff_id)
@@ -7330,7 +7348,11 @@ async def notify_debt_rejected_ep(
             asyncio.create_task(send_web_push(drv["id"], "❌ Запрос отклонён", body_drv,
                                               push_type="debt_rejected", order_id=order_id))
     async with db.pool.acquire() as _c:
-        approvers = await _c.fetch("SELECT id FROM staff WHERE can_approve_debt=TRUE AND active=TRUE")
+        approvers = await _c.fetch("""
+            SELECT s.id FROM staff s
+            JOIN orders o ON o.company_id = s.company_id
+            WHERE s.can_approve_debt=TRUE AND s.active=TRUE AND o.id=$1
+        """, order_id)
     for mgr in approvers:
         asyncio.create_task(send_web_push(mgr["id"], "❌ Запрос отклонён", body_mgr,
                                           push_type="debt_rejected", order_id=order_id))
@@ -7354,7 +7376,11 @@ async def notify_debt_approved_ep(
             asyncio.create_task(send_web_push(drv["id"], "✅ Долг одобрен", body_drv,
                                               push_type="debt_approved", order_id=order_id))
     async with db.pool.acquire() as _c:
-        approvers = await _c.fetch("SELECT id FROM staff WHERE can_approve_debt=TRUE AND active=TRUE")
+        approvers = await _c.fetch("""
+            SELECT s.id FROM staff s
+            JOIN orders o ON o.company_id = s.company_id
+            WHERE s.can_approve_debt=TRUE AND s.active=TRUE AND o.id=$1
+        """, order_id)
     for mgr in approvers:
         asyncio.create_task(send_web_push(mgr["id"], "✅ Долг одобрен", body_mgr,
                                           push_type="debt_approved", order_id=order_id))

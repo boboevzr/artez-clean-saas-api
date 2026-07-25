@@ -5326,16 +5326,24 @@ async def save_order_photo(order_id: int, tg_file_id: str, tg_file_type: str,
         """, order_id, tg_file_id, tg_file_type, photo_type, note, uploaded_by)
         return dict(row) if row else {}
 
-async def delete_order_photo(photo_id: int) -> bool:
+async def delete_order_photo(photo_id: int, company_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
-        res = await conn.execute("DELETE FROM order_photos WHERE id=$1", photo_id)
-        return res == "DELETE 1"
+        res = await conn.execute("""
+            DELETE FROM order_photos p
+            USING orders o
+            WHERE p.id=$1 AND o.id = p.order_id AND o.company_id=$2
+        """, photo_id, company_id)
+        return res != "DELETE 0"
 
-async def get_photo_by_id(photo_id: int) -> dict:
+async def get_photo_by_id(photo_id: int, company_id: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM order_photos WHERE id=$1", photo_id)
+        row = await conn.fetchrow("""
+            SELECT p.* FROM order_photos p
+            JOIN orders o ON o.id = p.order_id
+            WHERE p.id=$1 AND o.company_id=$2
+        """, photo_id, company_id)
         return dict(row) if row else {}
 
 # ── Оплата заказов ────────────────────────────────────────────────────────────
@@ -5676,11 +5684,15 @@ async def add_item_media(item_id: int, order_id: int, tg_file_id: str, tg_file_t
         """, item_id, order_id, tg_file_id, tg_file_type, created_by)
         return dict(row) if row else {}
 
-async def delete_item_media(media_id: int) -> bool:
+async def delete_item_media(media_id: int, company_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM order_item_media WHERE id=$1", media_id)
-        return True
+        result = await conn.execute("""
+            DELETE FROM order_item_media m
+            USING orders o
+            WHERE m.id=$1 AND o.id = m.order_id AND o.company_id=$2
+        """, media_id, company_id)
+        return result != "DELETE 0"
 
 async def claim_measure_review(item_id: int, staff_id: int) -> dict:
     """Пометить замер как «принят на проверку» конкретным сотрудником."""
@@ -5786,10 +5798,14 @@ async def reject_item_measure(item_id: int, note: str) -> dict:
         """, item_id, note or '')
         return dict(row) if row else {}
 
-async def get_item_media_by_id(media_id: int) -> dict:
+async def get_item_media_by_id(media_id: int, company_id: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM order_item_media WHERE id=$1", media_id)
+        row = await conn.fetchrow("""
+            SELECT m.* FROM order_item_media m
+            JOIN orders o ON o.id = m.order_id
+            WHERE m.id=$1 AND o.company_id=$2
+        """, media_id, company_id)
         return dict(row) if row else {}
 
 # ── МАРШРУТЫ (routes) ────────────────────────────────────────────────────────
@@ -6830,10 +6846,11 @@ async def get_order_debt_amount(order_id: int) -> float:
 
 async def get_debt_approvers() -> list:
     if not pool: return []
+    cid = _cid()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, first_name, last_name, tg_id FROM staff "
-            "WHERE can_approve_debt=TRUE AND active=TRUE AND tg_id IS NOT NULL")
+            "WHERE can_approve_debt=TRUE AND active=TRUE AND tg_id IS NOT NULL AND company_id=$1", cid)
         return [dict(r) for r in rows]
 
 async def mark_order_delivered_with_debt(order_id: int, responsible_id: int,
@@ -6937,30 +6954,32 @@ async def get_pending_discount_requests() -> list:
 
 async def resolve_discount_request(request_id: int, approved_amount: float, resolved_by: int) -> dict | None:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE discount_requests
                SET status='approved', approved_amount=$2, resolved_by=$3, resolved_at=NOW()
-             WHERE id=$1 AND status='pending'
+             WHERE id=$1 AND status='pending' AND company_id=$4
             RETURNING *
-        """, request_id, approved_amount, resolved_by)
+        """, request_id, approved_amount, resolved_by, cid)
         if not row:
             return None
         r = dict(row)
         await conn.execute("""
-            UPDATE orders SET manual_discount = COALESCE(manual_discount,0) + $2 WHERE id=$1
-        """, r["order_id"], approved_amount)
+            UPDATE orders SET manual_discount = COALESCE(manual_discount,0) + $2 WHERE id=$1 AND company_id=$3
+        """, r["order_id"], approved_amount, cid)
         return r
 
 async def reject_discount_request(request_id: int, resolved_by: int) -> dict | None:
     if not pool: return None
+    cid = _cid()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE discount_requests
                SET status='rejected', resolved_by=$2, resolved_at=NOW()
-             WHERE id=$1 AND status='pending'
+             WHERE id=$1 AND status='pending' AND company_id=$3
             RETURNING *
-        """, request_id, resolved_by)
+        """, request_id, resolved_by, cid)
         return dict(row) if row else None
 
 
@@ -7059,13 +7078,19 @@ async def resolve_debt_approval(request_id: int, resolution: str, resolved_by: i
                                  responsible_id: int | None = None) -> dict | None:
     if not pool: return None
     from datetime import date, timedelta
+    cid = _cid()
     async with pool.acquire() as conn:
+        if responsible_id is not None:
+            owns = await conn.fetchval(
+                "SELECT 1 FROM staff WHERE id=$1 AND company_id=$2", responsible_id, cid)
+            if not owns:
+                return None
         row = await conn.fetchrow("""
             UPDATE debt_approval_requests
             SET status=$2, resolution=$3, resolved_by=$4, responsible_id=$5, resolved_at=NOW()
-            WHERE id=$1 AND status='pending'
+            WHERE id=$1 AND status='pending' AND company_id=$6
             RETURNING *
-        """, request_id, resolution, resolution, resolved_by, responsible_id)
+        """, request_id, resolution, resolution, resolved_by, responsible_id, cid)
         if not row: return None
         r = dict(row)
         if resolution == 'approved' and responsible_id:
