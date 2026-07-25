@@ -10151,6 +10151,10 @@ async def public_register_company(req: PublicRegisterRequest):
     if not company:
         raise HTTPException(status_code=409, detail="Такой адрес уже занят, выберите другой")
 
+    # Одноразовое использование: компания создана — это же подтверждение телефона
+    # больше нельзя переиспользовать для другой регистрации (в течение 30-минутного окна).
+    await db.consume_cleano_phone_verification(normalized_phone)
+
     await db.update_company(company["id"], {
         "contact_name":  req.contact_name.strip() or None,
         "contact_phone": req.contact_phone.strip(),

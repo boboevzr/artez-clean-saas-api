@@ -9142,6 +9142,15 @@ async def get_cleano_phone_verification(phone: str):
         return dict(row) if row else None
 
 
+async def consume_cleano_phone_verification(phone: str):
+    """Одноразовое использование: удаляет подтверждение сразу после успешного создания компании,
+    чтобы одно и то же подтверждение (действительное 30 минут) нельзя было переиспользовать
+    для другой регистрации с тем же номером."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM cleano_phone_verifications WHERE phone=$1", phone)
+
+
 async def get_saas_plan_by_slug(slug: str):
     if not pool: return None
     async with pool.acquire() as conn:
