@@ -905,7 +905,6 @@ async def sms_text(code: str, purpose: str = "register") -> str:
         "reset":    "Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}",
         "login":    "Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}",
         "register": "Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}",
-        "cleano_register": "Kod podtverzhdeniya nomera dlya registracii kompanii na Cleano.uz: {code}",
     }
     key = f"sms_text_{purpose}"
     tpl = await db.get_config(key) or defaults.get(purpose, defaults["register"])
@@ -10507,7 +10506,10 @@ async def cleano_phone_verify_start_sms(req: CleanoSmsStartRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(phone, code, "cleano_register", expires_at)
-    await send_sms(phone, await sms_text(code, "cleano_register"))
+    # Текст берём от уже одобренного у Eskiz шаблона "register" (реально доставляется клиентам ARTEZ) —
+    # "cleano_register" используется только для хранения кода/лимитов, не для текста SMS,
+    # чтобы не слать новый неодобренный шаблон.
+    await send_sms(phone, await sms_text(code, "register"))
     return {"ok": True}
 
 
