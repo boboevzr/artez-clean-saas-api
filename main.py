@@ -10133,7 +10133,7 @@ async def public_register_company(req: PublicRegisterRequest):
         await db.create_saas_subscription(
             company["id"], trial_plan["id"], date.today(), date.today() + timedelta(days=14),
             notes="Автоматический триал — регистрация с cleano.uz", status="trial")
-    return {"ok": True, "slug": slug, "admin_login": "admin"}
+    return {"ok": True, "slug": slug, "admin_login": "admin", "credentials": credentials}
 
 
 @app.post("/api/saas/companies/{company_id}/branches")
