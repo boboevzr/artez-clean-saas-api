@@ -606,6 +606,23 @@ async def create_tables():
         "CREATE INDEX IF NOT EXISTS idx_receipt_log_order ON order_receipt_log(order_id)",
         "ALTER TABLE order_receipt_log ADD COLUMN IF NOT EXISTS tg_chat_id    BIGINT DEFAULT NULL",
         "ALTER TABLE order_receipt_log ADD COLUMN IF NOT EXISTS tg_message_id BIGINT DEFAULT NULL",
+
+        # ── Подтверждение телефона при регистрации компании на cleano.uz ──
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS contact_tg_id BIGINT DEFAULT NULL",
+        "ALTER TABLE sms_codes DROP CONSTRAINT IF EXISTS sms_codes_purpose_check",
+        "ALTER TABLE sms_codes ADD CONSTRAINT sms_codes_purpose_check "
+        "CHECK (purpose IN ('register','login','reset','cleano_register'))",
+        """CREATE TABLE IF NOT EXISTS cleano_tg_links (
+            phone      VARCHAR(20) PRIMARY KEY,
+            tg_id      BIGINT      NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS cleano_phone_verifications (
+            phone       VARCHAR(20) PRIMARY KEY,
+            verified_at TIMESTAMPTZ NOT NULL,
+            method      VARCHAR(10) NOT NULL CHECK (method IN ('sms','telegram')),
+            tg_id       BIGINT      DEFAULT NULL
+        )""",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -8706,7 +8723,7 @@ async def update_company(company_id: int, updates: dict) -> bool:
     allowed = {"name", "slug", "secret_key", "plan", "max_branches", "max_staff", "active", "timezone", "trial_days",
                "legal_name", "inn", "address", "contact_name", "contact_phone", "contact_email", "notes",
                "whatsapp", "instagram", "tg_group_link", "tg_group_id", "tg_channel_link", "tg_channel_id",
-               "tg_admin_link", "tg_admin_id", "logo_url"}
+               "tg_admin_link", "tg_admin_id", "logo_url", "contact_tg_id"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields: return True
     cols = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
@@ -9082,6 +9099,47 @@ async def check_company_field_exists(column: str, value: str) -> bool:
             row = await conn.fetchval(
                 f"SELECT 1 FROM companies WHERE lower({column}) = lower($1) LIMIT 1", value.strip())
         return bool(row)
+
+
+# ── Подтверждение телефона при регистрации на cleano.uz (SMS или Telegram-бот) ──
+
+async def save_cleano_tg_link(phone: str, tg_id: int):
+    """Сохраняет связку телефон→tg_id, которую бот Cleano получил через 'поделиться контактом'."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO cleano_tg_links (phone, tg_id, created_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (phone) DO UPDATE SET tg_id=$2, created_at=NOW()
+        """, phone, tg_id)
+
+
+async def get_cleano_tg_id_by_phone(phone: str):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT tg_id FROM cleano_tg_links WHERE phone=$1", phone)
+        return row["tg_id"] if row else None
+
+
+async def mark_cleano_phone_verified(phone: str, method: str, tg_id: int | None = None):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO cleano_phone_verifications (phone, verified_at, method, tg_id)
+            VALUES ($1, NOW(), $2, $3)
+            ON CONFLICT (phone) DO UPDATE SET verified_at=NOW(), method=$2, tg_id=$3
+        """, phone, method, tg_id)
+
+
+async def get_cleano_phone_verification(phone: str):
+    """Возвращает запись подтверждения, если она свежая (не старше 30 минут), иначе None."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT phone, verified_at, method, tg_id FROM cleano_phone_verifications
+            WHERE phone=$1 AND verified_at > NOW() - INTERVAL '30 minutes'
+        """, phone)
+        return dict(row) if row else None
 
 
 async def get_saas_plan_by_slug(slug: str):

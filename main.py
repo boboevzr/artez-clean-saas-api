@@ -1,6 +1,7 @@
 ﻿import os
 import re
 import base64
+import hashlib
 import secrets
 import logging
 import asyncio
@@ -904,6 +905,7 @@ async def sms_text(code: str, purpose: str = "register") -> str:
         "reset":    "Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}",
         "login":    "Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}",
         "register": "Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}",
+        "cleano_register": "Kod podtverzhdeniya nomera dlya registracii kompanii na Cleano.uz: {code}",
     }
     key = f"sms_text_{purpose}"
     tpl = await db.get_config(key) or defaults.get(purpose, defaults["register"])
@@ -10140,6 +10142,11 @@ async def public_register_company(req: PublicRegisterRequest):
     if req.contact_email and await db.check_company_field_exists("contact_email", req.contact_email):
         raise HTTPException(status_code=409, detail="Этот email уже зарегистрирован")
 
+    normalized_phone = normalize_phone(req.contact_phone)
+    verification = await db.get_cleano_phone_verification(normalized_phone)
+    if not verification:
+        raise HTTPException(status_code=400, detail="Подтвердите номер телефона перед регистрацией")
+
     company, credentials, secret_key = await _provision_company(
         name, slug, "starter", 1, 10, admin_password=req.admin_password)
     if not company:
@@ -10149,6 +10156,7 @@ async def public_register_company(req: PublicRegisterRequest):
         "contact_name":  req.contact_name.strip() or None,
         "contact_phone": req.contact_phone.strip(),
         "contact_email": (req.contact_email or "").strip() or None,
+        "contact_tg_id": verification.get("tg_id"),
         "trial_days":    14,
     })
     trial_plan = await db.get_saas_plan_by_slug("starter")
@@ -10348,8 +10356,10 @@ async def saas_delete_staff(company_id: int, staff_id: int, _=Depends(get_supera
 
 CLEANO_CONFIG_KEYS = [
     "cleano_phone", "cleano_telegram", "cleano_instagram", "cleano_facebook", "cleano_whatsapp",
-    "cleano_office_lat", "cleano_office_lng", "cleano_office_address",
+    "cleano_office_lat", "cleano_office_lng", "cleano_office_address", "cleano_bot_username",
 ]
+# Секретные ключи Cleano — доступны только суперадмину, НИКОГДА не попадают в public-settings
+CLEANO_SECRET_CONFIG_KEYS = ["cleano_bot_token"]
 
 class SaasGlobalSettingsRequest(BaseModel):
     yandex_maps_key: str | None = None
@@ -10361,11 +10371,13 @@ class SaasGlobalSettingsRequest(BaseModel):
     cleano_office_lat:     str | None = None
     cleano_office_lng:     str | None = None
     cleano_office_address: str | None = None
+    cleano_bot_username:   str | None = None
+    cleano_bot_token:      str | None = None
 
 @app.get("/api/saas/global-settings")
 async def saas_get_global_settings(_=Depends(get_superadmin)):
     settings = {"yandex_maps_key": await db.get_config("yandex_maps_key") or ""}
-    for k in CLEANO_CONFIG_KEYS:
+    for k in CLEANO_CONFIG_KEYS + CLEANO_SECRET_CONFIG_KEYS:
         settings[k] = await db.get_config(k) or ""
     return {"ok": True, "settings": settings}
 
@@ -10373,11 +10385,15 @@ async def saas_get_global_settings(_=Depends(get_superadmin)):
 async def saas_update_global_settings(req: SaasGlobalSettingsRequest, _=Depends(get_superadmin)):
     if req.yandex_maps_key is not None:
         await db.set_config("yandex_maps_key", req.yandex_maps_key)
-    for k in CLEANO_CONFIG_KEYS:
+    for k in CLEANO_CONFIG_KEYS + CLEANO_SECRET_CONFIG_KEYS:
         v = getattr(req, k)
         if v is not None:
             await db.set_config(k, v)
-    return {"ok": True}
+
+    webhook_result = None
+    if req.cleano_bot_token is not None and req.cleano_bot_token.strip():
+        webhook_result = await _cleano_bot_set_webhook(req.cleano_bot_token.strip())
+    return {"ok": True, "webhook": webhook_result}
 
 
 @app.get("/api/saas/public-settings")
@@ -10387,6 +10403,126 @@ async def public_saas_settings():
     for k in CLEANO_CONFIG_KEYS:
         settings[k] = await db.get_config(k) or ""
     return {"ok": True, "settings": settings}
+
+
+# ══════════════════════════════════════
+#  ПОДТВЕРЖДЕНИЕ ТЕЛЕФОНА ПРИ РЕГИСТРАЦИИ НА CLEANO.UZ (SMS или Telegram-бот)
+#  Отдельный бот от artez_bot (клиенты ARTEZ) — свой токен, своя таблица привязки.
+# ══════════════════════════════════════
+
+def _cleano_bot_webhook_secret(token: str) -> str:
+    return hashlib.sha256(f"cleano-webhook-{token}".encode()).hexdigest()[:32]
+
+
+async def _cleano_bot_set_webhook(token: str):
+    """Регистрирует webhook Cleano-бота в Telegram сразу при сохранении токена в суперадмине."""
+    if not APP_URL:
+        return {"ok": False, "error": "APP_URL не задан на сервере"}
+    url = f"{APP_URL}/api/cleano/tg-webhook"
+    secret = _cleano_bot_webhook_secret(token)
+    try:
+        async with aiohttp.ClientSession() as s:
+            r = await s.post(
+                f"https://api.telegram.org/bot{token}/setWebhook",
+                json={"url": url, "secret_token": secret, "allowed_updates": ["message"]},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            data = await r.json()
+            return {"ok": bool(data.get("ok")), "description": data.get("description", "")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def _cleano_bot_send(token: str, chat_id, text: str, reply_markup: dict | None = None):
+    if not token or not chat_id:
+        return
+    try:
+        payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        async with aiohttp.ClientSession() as s:
+            await s.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload,
+                         timeout=aiohttp.ClientTimeout(total=8))
+    except Exception as e:
+        logging.warning(f"_cleano_bot_send error: {e}")
+
+
+@app.post("/api/cleano/tg-webhook")
+async def cleano_tg_webhook(request: Request):
+    """Webhook Telegram-бота Cleano — только запрос номера и приём 'поделиться контактом'."""
+    token = await db.get_config("cleano_bot_token")
+    if not token:
+        return {"ok": True}
+    expected_secret = _cleano_bot_webhook_secret(token)
+    got_secret = request.headers.get("x-telegram-bot-api-secret-token", "")
+    if not secrets.compare_digest(got_secret, expected_secret):
+        raise HTTPException(status_code=403, detail="Invalid secret token")
+
+    update = await request.json()
+    msg = update.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    if not chat_id:
+        return {"ok": True}
+
+    contact = msg.get("contact")
+    if contact and contact.get("phone_number"):
+        phone = normalize_phone(contact["phone_number"])
+        await db.save_cleano_tg_link(phone, chat_id)
+        await db.mark_cleano_phone_verified(phone, "telegram", tg_id=chat_id)
+        await _cleano_bot_send(token, chat_id,
+            "✅ Raqam tasdiqlandi! Endi cleano.uz saytiga qaytib, ro'yxatdan o'tishni yakunlashingiz mumkin."
+            "\n\n✅ Номер подтверждён! Вернитесь на cleano.uz и завершите регистрацию.")
+        return {"ok": True}
+
+    text = (msg.get("text") or "").strip()
+    if text.startswith("/start"):
+        keyboard = {
+            "keyboard": [[{"text": "📱 Raqamni ulashish / Поделиться номером", "request_contact": True}]],
+            "resize_keyboard": True, "one_time_keyboard": True,
+        }
+        await _cleano_bot_send(token, chat_id,
+            "👋 <b>Cleano</b>\n\nKompaniyani ro'yxatdan o'tkazishda telefon raqamingizni tasdiqlash uchun "
+            "pastdagi tugma orqali raqamingizni ulashing.\n\nПодтвердите номер телефона для регистрации "
+            "компании — поделитесь контактом кнопкой ниже.",
+            reply_markup=keyboard)
+    return {"ok": True}
+
+
+@app.get("/api/saas/phone-verify-status")
+async def cleano_phone_verify_status(phone: str):
+    phone = normalize_phone(phone)
+    v = await db.get_cleano_phone_verification(phone)
+    return {"ok": True, "verified": v is not None, "method": v["method"] if v else None}
+
+
+class CleanoSmsStartRequest(BaseModel):
+    phone: str
+
+@app.post("/api/saas/phone-verify/start-sms")
+async def cleano_phone_verify_start_sms(req: CleanoSmsStartRequest):
+    phone = normalize_phone(req.phone)
+    ok, err = await db.check_sms_rate_limit(phone, "cleano_register")
+    if not ok:
+        raise HTTPException(status_code=429, detail=err)
+    code = generate_code()
+    expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
+    await db.save_sms_code(phone, code, "cleano_register", expires_at)
+    await send_sms(phone, await sms_text(code, "cleano_register"))
+    return {"ok": True}
+
+
+class CleanoSmsConfirmRequest(BaseModel):
+    phone: str
+    code: str
+
+@app.post("/api/saas/phone-verify/confirm-sms")
+async def cleano_phone_verify_confirm_sms(req: CleanoSmsConfirmRequest):
+    phone = normalize_phone(req.phone)
+    ok = await db.check_sms_code(phone, req.code.strip(), "cleano_register")
+    if not ok:
+        raise HTTPException(status_code=400, detail="Неверный или просроченный код")
+    await db.mark_cleano_phone_verified(phone, "sms")
+    return {"ok": True}
 
 
 # ── SAAS PLANS ──────────────────────────────────────────────────────────────
