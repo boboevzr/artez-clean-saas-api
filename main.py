@@ -10020,16 +10020,18 @@ async def saas_list_companies(_=Depends(get_superadmin)):
     return {"ok": True, "companies": [dict(r) for r in rows]}
 
 
-@app.post("/api/saas/companies")
-async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmin)):
-    slug = req.slug.lower().strip()
+async def _provision_company(name: str, slug: str, plan: str, max_branches: int, max_staff: int,
+                              admin_password: str | None = None):
+    """Полное создание компании: staff-аккаунты, первый филиал, seed всех каталогов.
+    Общая логика для superadmin-создания и публичной self-service регистрации.
+    admin_password=None сохраняет прежнее поведение (login=password='admin')."""
     secret_key = secrets.token_urlsafe(32)
     company = await db.create_company(
-        name=req.name, slug=slug, secret_key=secret_key,
-        plan=req.plan, max_branches=req.max_branches, max_staff=req.max_staff,
+        name=name, slug=slug, secret_key=secret_key,
+        plan=plan, max_branches=max_branches, max_staff=max_staff,
     )
     if not company:
-        raise HTTPException(status_code=409, detail="Slug уже занят")
+        return None, [], secret_key
     credentials = []
     # Уровень компании: без привязки к филиалу, доступ в admin-панель
     for first_name, login, role, position in [
@@ -10037,7 +10039,7 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
         ("Менеджер",   "manager",    "manager",    "Менеджер"),
         ("Колл-центр", "callcenter", "callcenter", "Оператор колл-центра"),
     ]:
-        pw = login
+        pw = admin_password if (login == "admin" and admin_password) else login
         hashed = pwd_context.hash(pw[:72])
         try:
             await db.create_staff({"first_name": first_name, "login": login,
@@ -10049,7 +10051,7 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
             pass
     # Создаём первый филиал
     try:
-        await db.create_branch(company_id=company["id"], slug=slug, name_ru=req.name)
+        await db.create_branch(company_id=company["id"], slug=slug, name_ru=name)
     except Exception:
         pass
     # Уровень филиала: привязаны к первому филиалу, без доступа в admin-панель
@@ -10079,7 +10081,59 @@ async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmi
     await db.seed_company_site_slides(company["id"])
     await db.seed_company_site_reviews(company["id"])
     await db.seed_company_site_faq(company["id"])
+    return company, credentials, secret_key
+
+
+@app.post("/api/saas/companies")
+async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmin)):
+    slug = req.slug.lower().strip()
+    company, credentials, secret_key = await _provision_company(
+        req.name, slug, req.plan, req.max_branches, req.max_staff)
+    if not company:
+        raise HTTPException(status_code=409, detail="Slug уже занят")
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
+
+
+class PublicRegisterRequest(BaseModel):
+    company_name:  str
+    slug:          str
+    contact_name:  str
+    contact_phone: str
+    contact_email: str | None = None
+    admin_password: str
+
+@app.post("/api/saas/register")
+async def public_register_company(req: PublicRegisterRequest):
+    """Самостоятельная регистрация компании с лендинга cleano.uz — создаёт триал на 14 дней."""
+    name = req.company_name.strip()
+    slug = req.slug.lower().strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Укажите название компании")
+    if not SLUG_RE.match(slug):
+        raise HTTPException(status_code=400, detail="Адрес: только латиница, цифры и дефис, от 3 до 50 символов")
+    if not req.contact_phone.strip():
+        raise HTTPException(status_code=400, detail="Укажите телефон")
+    if len(req.admin_password) < 6:
+        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 6 символов")
+
+    company, credentials, secret_key = await _provision_company(
+        name, slug, "starter", 1, 10, admin_password=req.admin_password)
+    if not company:
+        raise HTTPException(status_code=409, detail="Такой адрес уже занят, выберите другой")
+
+    await db.update_company(company["id"], {
+        "contact_name":  req.contact_name.strip() or None,
+        "contact_phone": req.contact_phone.strip(),
+        "contact_email": (req.contact_email or "").strip() or None,
+        "trial_days":    14,
+    })
+    trial_plan = await db.get_saas_plan_by_slug("starter")
+    if trial_plan:
+        from datetime import date, timedelta
+        await db.create_saas_subscription(
+            company["id"], trial_plan["id"], date.today(), date.today() + timedelta(days=14),
+            notes="Автоматический триал — регистрация с cleano.uz", status="trial")
+    return {"ok": True, "slug": slug, "admin_login": "admin"}
 
 
 @app.post("/api/saas/companies/{company_id}/branches")
@@ -10268,20 +10322,47 @@ async def saas_delete_staff(company_id: int, staff_id: int, _=Depends(get_supera
     return {"ok": True}
 
 
+CLEANO_CONFIG_KEYS = [
+    "cleano_phone", "cleano_telegram", "cleano_instagram", "cleano_facebook", "cleano_whatsapp",
+    "cleano_office_lat", "cleano_office_lng", "cleano_office_address",
+]
+
 class SaasGlobalSettingsRequest(BaseModel):
     yandex_maps_key: str | None = None
+    cleano_phone:          str | None = None
+    cleano_telegram:       str | None = None
+    cleano_instagram:      str | None = None
+    cleano_facebook:       str | None = None
+    cleano_whatsapp:       str | None = None
+    cleano_office_lat:     str | None = None
+    cleano_office_lng:     str | None = None
+    cleano_office_address: str | None = None
 
 @app.get("/api/saas/global-settings")
 async def saas_get_global_settings(_=Depends(get_superadmin)):
-    return {"ok": True, "settings": {
-        "yandex_maps_key": await db.get_config("yandex_maps_key") or "",
-    }}
+    settings = {"yandex_maps_key": await db.get_config("yandex_maps_key") or ""}
+    for k in CLEANO_CONFIG_KEYS:
+        settings[k] = await db.get_config(k) or ""
+    return {"ok": True, "settings": settings}
 
 @app.put("/api/saas/global-settings")
 async def saas_update_global_settings(req: SaasGlobalSettingsRequest, _=Depends(get_superadmin)):
     if req.yandex_maps_key is not None:
         await db.set_config("yandex_maps_key", req.yandex_maps_key)
+    for k in CLEANO_CONFIG_KEYS:
+        v = getattr(req, k)
+        if v is not None:
+            await db.set_config(k, v)
     return {"ok": True}
+
+
+@app.get("/api/saas/public-settings")
+async def public_saas_settings():
+    """Публичные контакты/локация платформы Cleano — для лендинга cleano.uz (без авторизации)."""
+    settings = {}
+    for k in CLEANO_CONFIG_KEYS:
+        settings[k] = await db.get_config(k) or ""
+    return {"ok": True, "settings": settings}
 
 
 # ── SAAS PLANS ──────────────────────────────────────────────────────────────

@@ -9062,6 +9062,13 @@ async def delete_site_faq_item(faq_id: int, company_id: int) -> bool:
 #  SAAS PLANS / SUBSCRIPTIONS / PAYMENTS
 # ══════════════════════════════════════
 
+async def get_saas_plan_by_slug(slug: str):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM saas_plans WHERE slug=$1", slug)
+        return dict(row) if row else None
+
+
 async def get_saas_plans():
     """Список планов с месячными ценами."""
     if not pool: return []
