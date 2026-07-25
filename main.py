@@ -51,7 +51,7 @@ GROUP_DELIVERY_ZARAFSHAN_CHANNEL = os.getenv("GROUP_DELIVERY_ZARAFSHAN_CHANNEL",
 GROUP_DELIVERY_NAVOI_CHANNEL     = os.getenv("GROUP_DELIVERY_NAVOI_CHANNEL", "-1004483444044")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
-APP_URL            = os.getenv("APP_URL", "")  # https://your-app.railway.app
+APP_URL            = os.getenv("APP_URL", "https://web-production-eef2a.up.railway.app")
 
 async def _get_media_channel() -> str:
     ch = await db.get_media_channel_id()
