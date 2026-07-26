@@ -10349,6 +10349,26 @@ async def saas_set_admin_password(company_id: int, body: dict, _=Depends(get_sup
     return {"ok": True}
 
 
+@app.post("/api/saas/companies/{company_id}/master-password")
+async def saas_reset_master_password(company_id: int, _=Depends(get_superadmin)):
+    company = await db.get_company(company_id)
+    if not company:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    new_password = secrets.token_urlsafe(6)
+    await db.set_config_for_company("admin_pass", new_password, company_id)
+    sent_via_telegram = False
+    if company["contact_tg_id"]:
+        bot_token = await db.get_config("cleano_bot_token")
+        if bot_token:
+            await _cleano_bot_send(bot_token, company["contact_tg_id"],
+                f"🔐 <b>{company['name']}</b>\n\nYangi maxfiy parol (o'chirishlarni tasdiqlash uchun admin-panelda): "
+                f"<code>{new_password}</code>\n\n"
+                f"🔐 Новый мастер-пароль (для подтверждения удалений в админ-панели): "
+                f"<code>{new_password}</code>")
+            sent_via_telegram = True
+    return {"ok": True, "password": new_password, "sent_via_telegram": sent_via_telegram}
+
+
 @app.put("/api/saas/companies/{company_id}")
 async def saas_update_company(company_id: int, req: CompanyUpdateRequest, _=Depends(get_superadmin)):
     c = await db.get_company(company_id)
