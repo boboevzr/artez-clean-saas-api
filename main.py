@@ -3599,6 +3599,10 @@ async def admin_login(req: AdminLoginRequest):
         company_id = await db.get_company_id_by_slug(req.company_slug)
         if not company_id:
             raise HTTPException(status_code=401, detail="Компания не найдена")
+    company = await db.get_company(company_id)
+    if not company or not company["contact_tg_id"]:
+        raise HTTPException(status_code=403, detail="Компания не привязана к Telegram-боту Cleano. "
+                             "Откройте бота по ссылке от нашей поддержки и поделитесь контактом.")
     staff = await db.get_staff_by_login(req.login, company_id)
     _ADMIN_ROLES = ("admin", "manager", "callcenter")
     if not staff or staff["role"] not in _ADMIN_ROLES:
@@ -10115,6 +10119,13 @@ async def _provision_company(name: str, slug: str, plan: str, max_branches: int,
     await db.seed_company_site_reviews(company["id"], city_ru=city_ru, city_uz=city_uz)
     await db.seed_company_site_faq(company["id"])
     await db.seed_company_defaults(company["id"], name)
+
+    # Мастер-пароль для подтверждения опасных действий — свой уникальный на компанию,
+    # а не общий ADMIN_PASS по умолчанию для всех.
+    master_password = secrets.token_urlsafe(6)
+    await db.set_config_for_company("admin_pass", master_password, company["id"])
+    credentials.append({"level": "company", "role": "master_password", "login": "—", "password": master_password})
+
     return company, credentials, secret_key
 
 
@@ -10229,6 +10240,20 @@ async def public_register_company(req: PublicRegisterRequest):
         await db.create_saas_subscription(
             company["id"], trial_plan["id"], date.today(), date.today() + timedelta(days=14),
             notes="Автоматический триал — регистрация с cleano.uz", status="trial")
+
+    # Мастер-пароль дублируем в Telegram-бот (верификация только через него) — на случай,
+    # если пользователь не сохранит таблицу с экрана регистрации.
+    tg_id = verification.get("tg_id")
+    if tg_id:
+        master_row = next((c for c in credentials if c.get("role") == "master_password"), None)
+        bot_token = await db.get_config("cleano_bot_token")
+        if master_row and bot_token:
+            await _cleano_bot_send(bot_token, tg_id,
+                f"🔐 <b>{name}</b>\n\nMaxfiy parol (o'chirishlarni tasdiqlash uchun admin-panelda): "
+                f"<code>{master_row['password']}</code>\n\n"
+                f"🔐 Мастер-пароль (для подтверждения удалений в админ-панели): "
+                f"<code>{master_row['password']}</code>")
+
     return {"ok": True, "slug": slug, "admin_login": "admin", "credentials": credentials}
 
 
@@ -10278,6 +10303,21 @@ async def saas_impersonate_company(company_id: int, _=Depends(get_superadmin)):
         raise HTTPException(status_code=404, detail="Admin-сотрудник не найден")
     token = create_staff_token(admin["id"], admin["login"], admin["role"], company_id)
     return {"ok": True, "token": token, "company_name": c["name"], "slug": c["slug"]}
+
+
+@app.get("/api/saas/companies/{company_id}/telegram-link")
+async def saas_company_telegram_link(company_id: int, _=Depends(get_superadmin)):
+    """Персистентная ссылка t.me/<bot>?start=company_<id> — суперадмин отправляет её клиенту
+    (WhatsApp/SMS/лично), клиент открывает бота и делится контактом, чтобы привязать Telegram
+    к своей компании (без этого доступ к admin.html заблокирован)."""
+    c = await db.get_company(company_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    bot_username = await db.get_config("cleano_bot_username")
+    if not bot_username:
+        raise HTTPException(status_code=503, detail="Username Cleano-бота не настроен в Глобальных настройках")
+    link = f"https://t.me/{bot_username}?start=company_{company_id}"
+    return {"ok": True, "link": link, "linked": bool(c["contact_tg_id"])}
 
 
 @app.get("/api/saas/companies/{company_id}/config")
@@ -10542,6 +10582,18 @@ async def cleano_tg_webhook(request: Request):
     contact = msg.get("contact")
     if contact and contact.get("phone_number"):
         phone = normalize_phone(contact["phone_number"])
+        # Если это переход по персистентной ссылке суперадмина (t.me/<bot>?start=company_<id>) —
+        # привязываем Telegram НАПРЯМУЮ к указанной компании, а не через сопоставление по номеру.
+        pending_company_id = await db.get_pending_company_link(chat_id)
+        if pending_company_id:
+            await db.update_company(pending_company_id, {"contact_tg_id": chat_id})
+            await db.consume_pending_company_link(chat_id)
+            company = await db.get_company(pending_company_id)
+            name = company["name"] if company else ""
+            await _cleano_bot_send(token, chat_id,
+                f"✅ Telegram muvaffaqiyatli ulandi: <b>{name}</b>\n\n"
+                f"✅ Telegram успешно привязан: <b>{name}</b>")
+            return {"ok": True}
         await db.save_cleano_tg_link(phone, chat_id)
         await db.mark_cleano_phone_verified(phone, "telegram", tg_id=chat_id)
         await _cleano_bot_send(token, chat_id,
@@ -10549,7 +10601,30 @@ async def cleano_tg_webhook(request: Request):
             "\n\n✅ Номер подтверждён! Вернитесь на cleano.uz и завершите регистрацию.")
         return {"ok": True}
 
-    # Любой текст (не только /start) ведёт себя как главное меню — чтобы не нужно было
+    text = (msg.get("text") or "").strip()
+    share_keyboard = {
+        "keyboard": [[{"text": "📱 Raqamni ulashish / Поделиться номером", "request_contact": True}]],
+        "resize_keyboard": True, "one_time_keyboard": True,
+    }
+    # Персистентная ссылка суперадмина: /start company_<id>
+    if text.startswith("/start company_"):
+        try:
+            target_company_id = int(text.split("company_", 1)[1].strip())
+        except (IndexError, ValueError):
+            target_company_id = None
+        company = await db.get_company(target_company_id) if target_company_id else None
+        if not company:
+            await _cleano_bot_send(token, chat_id, "⚠️ Havola noto'g'ri yoki eskirgan.\n\n⚠️ Ссылка неверна или устарела.")
+            return {"ok": True}
+        await db.save_pending_company_link(chat_id, target_company_id)
+        await _cleano_bot_send(token, chat_id,
+            f"👋 <b>Cleano</b>\n\n<b>{company['name']}</b> nomidan Telegram-ni ulash uchun "
+            f"pastdagi tugma orqali raqamingizni ulashing.\n\n"
+            f"Поделитесь контактом кнопкой ниже, чтобы привязать Telegram к компании <b>{company['name']}</b>.",
+            reply_markup=share_keyboard)
+        return {"ok": True}
+
+    # Любой другой текст (не только /start) ведёт себя как главное меню — чтобы не нужно было
     # набирать команду вручную (пользователь может просто написать что угодно или нажать
     # на кнопку меню рядом со строкой ввода, которая показывает /start в списке команд).
     company = await db.get_company_by_contact_tg_id(chat_id)
@@ -10560,15 +10635,11 @@ async def cleano_tg_webhook(request: Request):
             f"✅ Ваша компания уже зарегистрирована: <b>{company['name']}</b>\n"
             f"Админ-панель: https://cleano.uz/admin.html?company_slug={company['slug']}")
     else:
-        keyboard = {
-            "keyboard": [[{"text": "📱 Raqamni ulashish / Поделиться номером", "request_contact": True}]],
-            "resize_keyboard": True, "one_time_keyboard": True,
-        }
         await _cleano_bot_send(token, chat_id,
             "👋 <b>Cleano</b>\n\nKompaniyani ro'yxatdan o'tkazishda telefon raqamingizni tasdiqlash uchun "
             "pastdagi tugma orqali raqamingizni ulashing.\n\nПодтвердите номер телефона для регистрации "
             "компании — поделитесь контактом кнопкой ниже.",
-            reply_markup=keyboard)
+            reply_markup=share_keyboard)
     return {"ok": True}
 
 
@@ -10577,39 +10648,6 @@ async def cleano_phone_verify_status(phone: str):
     phone = normalize_phone(phone)
     v = await db.get_cleano_phone_verification(phone)
     return {"ok": True, "verified": v is not None, "method": v["method"] if v else None}
-
-
-class CleanoSmsStartRequest(BaseModel):
-    phone: str
-
-@app.post("/api/saas/phone-verify/start-sms")
-async def cleano_phone_verify_start_sms(req: CleanoSmsStartRequest):
-    phone = normalize_phone(req.phone)
-    ok, err = await db.check_sms_rate_limit(phone, "cleano_register")
-    if not ok:
-        raise HTTPException(status_code=429, detail=err)
-    code = generate_code()
-    expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
-    await db.save_sms_code(phone, code, "cleano_register", expires_at)
-    # Текст берём от уже одобренного у Eskiz шаблона "register" (реально доставляется клиентам ARTEZ) —
-    # "cleano_register" используется только для хранения кода/лимитов, не для текста SMS,
-    # чтобы не слать новый неодобренный шаблон.
-    await send_sms(phone, await sms_text(code, "register"))
-    return {"ok": True}
-
-
-class CleanoSmsConfirmRequest(BaseModel):
-    phone: str
-    code: str
-
-@app.post("/api/saas/phone-verify/confirm-sms")
-async def cleano_phone_verify_confirm_sms(req: CleanoSmsConfirmRequest):
-    phone = normalize_phone(req.phone)
-    ok = await db.check_sms_code(phone, req.code.strip(), "cleano_register")
-    if not ok:
-        raise HTTPException(status_code=400, detail="Неверный или просроченный код")
-    await db.mark_cleano_phone_verified(phone, "sms")
-    return {"ok": True}
 
 
 # ══════════════════════════════════════

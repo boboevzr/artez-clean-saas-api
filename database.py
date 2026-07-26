@@ -623,6 +623,13 @@ async def create_tables():
             method      VARCHAR(10) NOT NULL CHECK (method IN ('sms','telegram')),
             tg_id       BIGINT      DEFAULT NULL
         )""",
+        # Персистентная ссылка суперадмина t.me/<bot>?start=company_<id> — между "/start company_X"
+        # и последующим "поделиться контактом" нужно помнить, к какой компании привязываем этот chat_id.
+        """CREATE TABLE IF NOT EXISTS cleano_pending_company_link (
+            chat_id     BIGINT PRIMARY KEY,
+            company_id  INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            expires_at  TIMESTAMPTZ NOT NULL
+        )""",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -9196,6 +9203,33 @@ async def consume_cleano_phone_verification(phone: str):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM cleano_phone_verifications WHERE phone=$1", phone)
+
+
+# ── Персистентная ссылка суперадмина t.me/<bot>?start=company_<id> ──────────
+
+async def save_pending_company_link(chat_id: int, company_id: int):
+    """Запоминает на 30 минут: этот chat_id сейчас привязывается к company_id
+    (между /start company_X и последующим 'поделиться контактом')."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO cleano_pending_company_link (chat_id, company_id, expires_at)
+            VALUES ($1, $2, NOW() + INTERVAL '30 minutes')
+            ON CONFLICT (chat_id) DO UPDATE SET company_id=$2, expires_at=NOW() + INTERVAL '30 minutes'
+        """, chat_id, company_id)
+
+
+async def get_pending_company_link(chat_id: int):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT company_id FROM cleano_pending_company_link WHERE chat_id=$1 AND expires_at > NOW()", chat_id)
+
+
+async def consume_pending_company_link(chat_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM cleano_pending_company_link WHERE chat_id=$1", chat_id)
 
 
 async def get_saas_plan_by_slug(slug: str):
