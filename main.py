@@ -3692,6 +3692,9 @@ async def admin_create_lead(req: LeadCreateRequest, _=Depends(_get_admin)):
         "short_address": req.short_address, "note": req.note,
         "assigned_to": req.assigned_to, "created_by": None,
     })
+    if lead:
+        admin_staff = {"role": "admin", "first_name": "Админ", "last_name": "", "login": "admin"}
+        asyncio.create_task(_notify_new_lead(lead, admin_staff))
     return {"ok": True, "lead": lead}
 
 # ══════════════════════════════════════════════════════════════════════════════
