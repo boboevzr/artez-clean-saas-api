@@ -260,6 +260,7 @@ async def create_tables():
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
+        "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS lang          VARCHAR(2)   DEFAULT NULL",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_items      BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_measure         BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_approve_measure BOOLEAN DEFAULT FALSE",
@@ -7006,6 +7007,134 @@ async def reject_discount_request(request_id: int, resolved_by: int) -> dict | N
             RETURNING *
         """, request_id, resolved_by, cid)
         return dict(row) if row else None
+
+
+# ── Портировано из прод-бота (миграция artez_bot → SaaS) ─────────────────────
+# Функции ниже принимают company_id явным параметром (не через _cid()), т.к.
+# вызываются напрямую из бота — отдельного процесса вне FastAPI request-контекста.
+
+async def get_client_lang(tg_id: int, company_id: int) -> str | None:
+    """Сохранённый язык клиента бота ('ru'/'uz') или None, если клиент не найден."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT lang FROM crm_clients WHERE tg_id=$1 AND company_id=$2", tg_id, company_id)
+    return row["lang"] if row else None
+
+async def set_client_lang(tg_id: int, lang: str, company_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE crm_clients SET lang=$1, updated_at=NOW() WHERE tg_id=$2 AND company_id=$3",
+            lang, tg_id, company_id)
+
+async def apply_auto_discount(order_id: int, amount: float, company_id: int) -> bool:
+    """Применить авто-скидку (округление суммы) к заказу без ручного согласования."""
+    if not pool: return False
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE orders SET manual_discount = COALESCE(manual_discount,0) + $2 WHERE id=$1 AND company_id=$3",
+            order_id, amount, company_id)
+    return True
+
+async def get_live_promo_id_for_user(user_id: int, company_id: int) -> int | None:
+    """Живое (не истёкшее, не использованное) окно акции пользователя — для тега лида.
+    Не потребляет окно (used_order_id не трогаем — это делает реальный заказ)."""
+    if not pool or not user_id: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT pus.promotion_id
+            FROM promo_user_state pus
+            JOIN promotions p ON p.id = pus.promotion_id
+            WHERE pus.user_id = $1 AND pus.company_id = $2 AND pus.used_order_id IS NULL
+              AND pus.expires_at > NOW() AND p.is_active = TRUE
+            ORDER BY pus.created_at DESC LIMIT 1
+        """, user_id, company_id)
+        return row["promotion_id"] if row else None
+
+async def set_lead_promo(lead_num: str, promo_id: int, company_id: int) -> None:
+    """Помечает лид принадлежностью к акции (тег для сотрудников)."""
+    if not pool or not lead_num or not promo_id: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE leads SET promo_id=$1, updated_at=NOW() WHERE lead_num=$2 AND company_id=$3",
+            promo_id, lead_num, company_id)
+
+async def get_managers_with_push(company_id: int) -> list:
+    """Менеджеры и админы компании с tg_id — цели пуш-уведомлений о скидках/долгах."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, first_name, last_name, tg_id
+            FROM staff
+            WHERE role IN ('admin','manager') AND active=TRUE
+              AND tg_id IS NOT NULL AND company_id=$1
+        """, company_id)
+        return [dict(r) for r in rows]
+
+async def get_staff_by_role(company_id: int, role: str) -> list:
+    """Активные сотрудники компании с указанной ролью (для группового роутинга)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM staff WHERE company_id=$1 AND role=$2 AND active=TRUE ORDER BY first_name",
+            company_id, role)
+        return [dict(r) for r in rows]
+
+async def take_lead(lead_id: int, staff_id: int, staff_name: str, company_id: int):
+    """Назначает лид на сотрудника (кнопка «Взять лид» в боте).
+    Возвращает (status, taker_name, taker_verb): status один из
+    'ok'|'already_mine'|'taken'|'not_found'."""
+    if not pool: return ('error', '', '')
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT assigned_to, lead_num FROM leads WHERE id=$1 AND company_id=$2", lead_id, company_id)
+        if not row:
+            return ('not_found', '', '')
+        if row['assigned_to'] and row['assigned_to'] != staff_id:
+            taker = await conn.fetchrow(
+                "SELECT first_name, last_name, gender FROM staff WHERE id=$1", row['assigned_to'])
+            taker_name = (f"{taker['first_name'] or ''} {taker['last_name'] or ''}".strip()
+                          if taker else 'другой сотрудник')
+            taker_verb = 'Взяла' if taker and taker.get('gender') == 'F' else 'Взял'
+            return ('taken', taker_name, taker_verb)
+        if row['assigned_to'] == staff_id:
+            return ('already_mine', '', '')
+        await conn.execute(
+            "UPDATE leads SET assigned_to=$1, updated_at=NOW() WHERE id=$2 AND company_id=$3",
+            staff_id, lead_id, company_id)
+        try:
+            await conn.execute("""
+                INSERT INTO lead_calls (lead_id, operator_id, action, note, created_at)
+                VALUES ($1,$2,'note',$3,NOW())
+            """, lead_id, staff_id, f"Лид взят через Telegram: {staff_name}")
+        except Exception:
+            pass
+        return ('ok', '', '')
+
+async def get_stats(company_id: int, branch: str = None) -> dict:
+    """Статистика заказов компании для админ-команды /stats бота."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        if branch:
+            row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status='new')       AS new_count,
+                    COUNT(*) FILTER (WHERE status='delivered') AS done_count,
+                    COUNT(*) FILTER (WHERE status='cancelled') AS cancel_count,
+                    COUNT(*)                                    AS total
+                FROM orders WHERE company_id=$1 AND branch=$2
+            """, company_id, branch)
+        else:
+            row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status='new')       AS new_count,
+                    COUNT(*) FILTER (WHERE status='delivered') AS done_count,
+                    COUNT(*) FILTER (WHERE status='cancelled') AS cancel_count,
+                    COUNT(*)                                    AS total
+                FROM orders WHERE company_id=$1
+            """, company_id)
+        return dict(row) if row else {}
 
 
 # ── Долговые одобрения ────────────────────────────────────────────────────────
