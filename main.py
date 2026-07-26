@@ -9946,6 +9946,12 @@ class CompanyCreateRequest(BaseModel):
     max_branches: int = 5
     max_staff:    int = 50
     admin_password: str = "admin1234"
+    subscription_mode: str = "demo"  # "demo" (14 дней, status=trial) | "full" (N месяцев, status=active)
+    subscription_months: int = 1     # используется только при subscription_mode="full"
+    city_ru:      str = ""
+    city_uz:      str = ""
+    workshop_lat: float | None = None
+    workshop_lng: float | None = None
 
 class CompanyUpdateRequest(BaseModel):
     name:             str | None = None
@@ -10039,10 +10045,15 @@ async def saas_list_companies(_=Depends(get_superadmin)):
 
 
 async def _provision_company(name: str, slug: str, plan: str, max_branches: int, max_staff: int,
-                              admin_password: str | None = None):
+                              admin_password: str | None = None,
+                              city_ru: str = "", city_uz: str = "",
+                              workshop_lat: float | None = None, workshop_lng: float | None = None):
     """Полное создание компании: staff-аккаунты, первый филиал, seed всех каталогов.
     Общая логика для superadmin-создания и публичной self-service регистрации.
-    admin_password=None сохраняет прежнее поведение (login=password='admin')."""
+    admin_password=None сохраняет прежнее поведение (login=password='admin').
+    city_ru/city_uz/workshop_lat/workshop_lng — данные из формы регистрации (город/район
+    и локация цеха клиента), используются для первого филиала и дефолтов сайта вместо
+    примеров ARTEZ (Навои/Зарафшан)."""
     secret_key = secrets.token_urlsafe(32)
     company = await db.create_company(
         name=name, slug=slug, secret_key=secret_key,
@@ -10067,9 +10078,13 @@ async def _provision_company(name: str, slug: str, plan: str, max_branches: int,
             credentials.append({"level": "company", "role": role, "login": login, "password": pw})
         except Exception:
             pass
-    # Создаём первый филиал
+    # Создаём первый филиал — название филиала: город/район клиента, если указан, иначе название компании
     try:
-        await db.create_branch(company_id=company["id"], slug=slug, name_ru=name)
+        await db.create_branch(
+            company_id=company["id"], slug=slug,
+            name_ru=city_ru or name, name_uz=city_uz or city_ru or name,
+            workshop_lat=workshop_lat, workshop_lon=workshop_lng,
+        )
     except Exception:
         pass
     # Уровень филиала: привязаны к первому филиалу, без доступа в admin-панель
@@ -10095,10 +10110,11 @@ async def _provision_company(name: str, slug: str, plan: str, max_branches: int,
     await db.seed_company_tg_messages(company["id"])
     await db.seed_company_expense_categories(company["id"])
     await db.seed_company_chat_templates(company["id"])
-    await db.seed_company_site_stats(company["id"])
+    await db.seed_company_site_stats(company["id"], city_ru=city_ru, city_uz=city_uz)
     await db.seed_company_site_slides(company["id"])
-    await db.seed_company_site_reviews(company["id"])
+    await db.seed_company_site_reviews(company["id"], city_ru=city_ru, city_uz=city_uz)
     await db.seed_company_site_faq(company["id"])
+    await db.seed_company_defaults(company["id"], name)
     return company, credentials, secret_key
 
 
@@ -10106,9 +10122,31 @@ async def _provision_company(name: str, slug: str, plan: str, max_branches: int,
 async def saas_create_company(req: CompanyCreateRequest, _=Depends(get_superadmin)):
     slug = req.slug.lower().strip()
     company, credentials, secret_key = await _provision_company(
-        req.name, slug, req.plan, req.max_branches, req.max_staff)
+        req.name, slug, req.plan, req.max_branches, req.max_staff,
+        city_ru=req.city_ru.strip(), city_uz=req.city_uz.strip(),
+        workshop_lat=req.workshop_lat, workshop_lng=req.workshop_lng)
     if not company:
         raise HTTPException(status_code=409, detail="Slug уже занят")
+
+    plan = await db.get_saas_plan_by_slug(req.plan)
+    if plan:
+        import calendar
+        from datetime import date, timedelta
+        start = date.today()
+        if req.subscription_mode == "full":
+            months = max(1, req.subscription_months)
+            total = start.month - 1 + months
+            year = start.year + total // 12
+            month = total % 12 + 1
+            day = min(start.day, calendar.monthrange(year, month)[1])
+            end = date(year, month, day)
+            await db.create_saas_subscription(company["id"], plan["id"], start, end,
+                                               notes="Создано суперадмином — полный доступ", status="active")
+        else:
+            end = start + timedelta(days=14)
+            await db.create_saas_subscription(company["id"], plan["id"], start, end,
+                                               notes="Создано суперадмином — демо-доступ", status="trial")
+
     return {"ok": True, "company": dict(company), "secret_key": secret_key, "credentials": credentials}
 
 
@@ -10119,6 +10157,10 @@ class PublicRegisterRequest(BaseModel):
     contact_phone: str
     contact_email: str | None = None
     admin_password: str
+    city_ru:        str | None = None
+    city_uz:        str | None = None
+    workshop_lat:   float | None = None
+    workshop_lng:   float | None = None
 
 _CHECK_FIELD_MAP = {
     "company_name": "name", "slug": "slug",
@@ -10164,7 +10206,9 @@ async def public_register_company(req: PublicRegisterRequest):
         raise HTTPException(status_code=400, detail="Подтвердите номер телефона перед регистрацией")
 
     company, credentials, secret_key = await _provision_company(
-        name, slug, "starter", 1, 10, admin_password=req.admin_password)
+        name, slug, "starter", 1, 10, admin_password=req.admin_password,
+        city_ru=(req.city_ru or "").strip(), city_uz=(req.city_uz or "").strip(),
+        workshop_lat=req.workshop_lat, workshop_lng=req.workshop_lng)
     if not company:
         raise HTTPException(status_code=409, detail="Такой адрес уже занят, выберите другой")
 

@@ -8925,9 +8925,11 @@ async def update_site_stat(stat_id: int, company_id: int, updates: dict) -> dict
     return dict(row) if row else None
 
 
-async def seed_company_site_stats(company_id: int):
+async def seed_company_site_stats(company_id: int, city_ru: str = "", city_uz: str = ""):
     """Заводит 4 карточки статистики для новой компании — из шаблона (company_id=0, заполняет суперадмин),
-    иначе 4 пустые (фиксированная 4-колоночная сетка на сайте)."""
+    иначе 4 пустые (фиксированная 4-колоночная сетка на сайте).
+    3-я карточка (индекс 2) в шаблоне — про города/филиалы (у ARTEZ: 'Навои и Зарафшан');
+    если при регистрации указан город клиента — подставляем его вместо шаблонного."""
     if not pool: return
     async with pool.acquire() as conn:
         count = await conn.fetchval("SELECT COUNT(*) FROM site_stats WHERE company_id=$1", company_id)
@@ -8937,14 +8939,36 @@ async def seed_company_site_stats(company_id: int):
             "SELECT value_ru, value_uz, label_ru, label_uz FROM site_stats WHERE company_id=0 ORDER BY sort_order, id LIMIT 4")
         if template:
             for i, r in enumerate(template):
+                value_ru, value_uz, label_ru, label_uz = r["value_ru"], r["value_uz"], r["label_ru"], r["label_uz"]
+                if i == 2 and city_ru:
+                    value_ru = value_uz = "1 📍"
+                    label_ru = f"город: {city_ru}"
+                    label_uz = f"shahar: {city_uz or city_ru}"
                 await conn.execute(
                     "INSERT INTO site_stats (company_id, value_ru, value_uz, label_ru, label_uz, sort_order) VALUES ($1,$2,$3,$4,$5,$6)",
-                    company_id, r["value_ru"], r["value_uz"], r["label_ru"], r["label_uz"], i)
+                    company_id, value_ru, value_uz, label_ru, label_uz, i)
         else:
             await conn.executemany(
                 "INSERT INTO site_stats (company_id, value_ru, value_uz, label_ru, label_uz, sort_order) VALUES ($1,'','','','',$2)",
                 [(company_id, i) for i in range(4)]
             )
+
+
+async def seed_company_defaults(company_id: int, name: str):
+    """Сидирует непустые дефолты для 'О компании' (футер сайта) и текста чека — чтобы
+    после регистрации поля не оставались пустыми (раньше показывали только placeholder 'ARTEZ')."""
+    if not pool: return
+    defaults = {
+        "footer_about_ru": f"{name} — химчистка ковров, мягкой мебели и текстиля. Работаем быстро и с гарантией качества.",
+        "footer_about_uz": f"{name} — gilam, yumshoq mebel va to'qimachilikni kimyoviy tozalash. Tez va sifat kafolati bilan ishlaymiz.",
+        "receipt_header_text": name,
+        "receipt_slogan": "Химчистка ковров, мебели, матрасов и штор",
+        "receipt_footer_note": "Спасибо, что выбрали нас!",
+    }
+    for key, value in defaults.items():
+        existing = await get_config_for_company(key, company_id)
+        if not existing:
+            await set_config_for_company(key, value, company_id)
 
 
 async def seed_company_site_slides(company_id: int, force: bool = False):
@@ -8965,8 +8989,9 @@ async def seed_company_site_slides(company_id: int, force: bool = False):
                  r["text_ru"], r["text_uz"], r["sort_order"])
 
 
-async def seed_company_site_reviews(company_id: int, force: bool = False):
-    """Копирует шаблонные отзывы из company_id=0 (заполняет суперадмин). Пусто, если шаблона нет."""
+async def seed_company_site_reviews(company_id: int, force: bool = False, city_ru: str = "", city_uz: str = ""):
+    """Копирует шаблонные отзывы из company_id=0 (заполняет суперадмин). Пусто, если шаблона нет.
+    Город в каждом отзыве (у ARTEZ: Навои/Зарафшан вперемешку) заменяется на город клиента, если указан."""
     if not pool: return
     async with pool.acquire() as conn:
         if not force:
@@ -8976,11 +9001,13 @@ async def seed_company_site_reviews(company_id: int, force: bool = False):
             await conn.execute("DELETE FROM site_reviews WHERE company_id=$1", company_id)
         template = await conn.fetch("SELECT * FROM site_reviews WHERE company_id=0 ORDER BY sort_order, id")
         for r in template:
+            c_ru = city_ru or r["city_ru"]
+            c_uz = city_uz or r["city_uz"]
             await conn.execute("""
                 INSERT INTO site_reviews (company_id, author_name, rating, text_ru, text_uz, city_ru, city_uz, sort_order)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             """, company_id, r["author_name"], r["rating"], r["text_ru"], r["text_uz"],
-                 r["city_ru"], r["city_uz"], r["sort_order"])
+                 c_ru, c_uz, r["sort_order"])
 
 
 async def seed_company_site_faq(company_id: int, force: bool = False):
