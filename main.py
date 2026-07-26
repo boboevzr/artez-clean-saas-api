@@ -7335,7 +7335,7 @@ async def _notify_debt_result(order_id: int, order_num: str, driver_tg_id, resul
     if driver_tg_id:
         try:
             async with db.pool.acquire() as _c:
-                drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", int(driver_tg_id))
+                drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", str(driver_tg_id))
             if drv:
                 drv_staff_id = drv["id"]
                 await send_web_push(drv["id"], title_drv, body_drv, push_type=push_type, order_id=order_id,
@@ -7368,7 +7368,7 @@ async def notify_debt_rejected_ep(
     body_mgr = f"Заказ {order_num} — запрос на долг отклонён"
     if driver_tg_id:
         async with db.pool.acquire() as _c:
-            drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", int(driver_tg_id))
+            drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", str(driver_tg_id))
         if drv:
             asyncio.create_task(send_web_push(drv["id"], "❌ Запрос отклонён", body_drv,
                                               push_type="debt_rejected", order_id=order_id))
@@ -7396,7 +7396,7 @@ async def notify_debt_approved_ep(
     body_mgr = f"Заказ {order_num} — долг одобрен"
     if driver_tg_id:
         async with db.pool.acquire() as _c:
-            drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", int(driver_tg_id))
+            drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", str(driver_tg_id))
         if drv:
             asyncio.create_task(send_web_push(drv["id"], "✅ Долг одобрен", body_drv,
                                               push_type="debt_approved", order_id=order_id))
