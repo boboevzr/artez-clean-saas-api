@@ -8704,6 +8704,15 @@ async def get_company(company_id: int):
             "SELECT * FROM companies WHERE id=$1", company_id
         )
 
+async def get_company_by_contact_tg_id(tg_id: int):
+    """Ищет компанию, чей владелец уже подтвердил телефон через Cleano-бота этим Telegram-аккаунтом
+    (contact_tg_id заполняется при успешной регистрации через public_register_company)."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT id, name, slug FROM companies WHERE contact_tg_id=$1 ORDER BY id DESC LIMIT 1", tg_id
+        )
+
 async def create_company(name: str, slug: str, secret_key: str,
                           plan: str = "starter", max_branches: int = 5, max_staff: int = 50):
     if not pool: return None

@@ -10492,6 +10492,17 @@ async def _cleano_bot_set_webhook(token: str):
                 timeout=aiohttp.ClientTimeout(total=10),
             )
             data = await r.json()
+            # Кнопка "Menu" рядом со строкой ввода — список команд, чтобы не набирать /start вручную.
+            await s.post(
+                f"https://api.telegram.org/bot{token}/setMyCommands",
+                json={"commands": [{"command": "start", "description": "Bosh menyu / Главное меню"}]},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            await s.post(
+                f"https://api.telegram.org/bot{token}/setChatMenuButton",
+                json={"menu_button": {"type": "commands"}},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
             return {"ok": bool(data.get("ok")), "description": data.get("description", "")}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -10538,8 +10549,17 @@ async def cleano_tg_webhook(request: Request):
             "\n\n✅ Номер подтверждён! Вернитесь на cleano.uz и завершите регистрацию.")
         return {"ok": True}
 
-    text = (msg.get("text") or "").strip()
-    if text.startswith("/start"):
+    # Любой текст (не только /start) ведёт себя как главное меню — чтобы не нужно было
+    # набирать команду вручную (пользователь может просто написать что угодно или нажать
+    # на кнопку меню рядом со строкой ввода, которая показывает /start в списке команд).
+    company = await db.get_company_by_contact_tg_id(chat_id)
+    if company:
+        await _cleano_bot_send(token, chat_id,
+            f"✅ Sizning kompaniyangiz allaqachon ro'yxatdan o'tgan: <b>{company['name']}</b>\n"
+            f"Admin-panel: https://cleano.uz/admin.html?company_slug={company['slug']}\n\n"
+            f"✅ Ваша компания уже зарегистрирована: <b>{company['name']}</b>\n"
+            f"Админ-панель: https://cleano.uz/admin.html?company_slug={company['slug']}")
+    else:
         keyboard = {
             "keyboard": [[{"text": "📱 Raqamni ulashish / Поделиться номером", "request_contact": True}]],
             "resize_keyboard": True, "one_time_keyboard": True,
