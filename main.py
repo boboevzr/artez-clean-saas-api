@@ -586,14 +586,20 @@ async def _notify_new_lead(lead: dict, staff: dict):
     if enabled not in ("1", "true"):
         return
 
-    # Роутинг по филиалу: своя группа или общая fallback
-    branch = (lead.get("branch", "") or "").lower().replace("📍", "").strip()
-    if branch in ("zarafshan", "зарафшан", "zarafshon"):
-        group_id = await _get_cfg("leads_group_zarafshan") or await _get_cfg("leads_group_id")
-    elif branch in ("navoi", "навои", "navoiy"):
-        group_id = await _get_cfg("leads_group_navoi") or await _get_cfg("leads_group_id")
+    # Роутинг по филиалу: сначала своя группа из карточки филиала (tg_leads_group_id),
+    # затем legacy ARTEZ-ключи (для обратной совместимости), затем общий fallback.
+    branch_slug = (lead.get("branch", "") or "").strip()
+    branch_group_id = await db.get_branch_tg_group_id(branch_slug, "tg_leads_group_id") if branch_slug else None
+    if branch_group_id:
+        group_id = str(branch_group_id)
     else:
-        group_id = await _get_cfg("leads_group_id")
+        branch = branch_slug.lower().replace("📍", "").strip()
+        if branch in ("zarafshan", "зарафшан", "zarafshon"):
+            group_id = await _get_cfg("leads_group_zarafshan") or await _get_cfg("leads_group_id")
+        elif branch in ("navoi", "навои", "navoiy"):
+            group_id = await _get_cfg("leads_group_navoi") or await _get_cfg("leads_group_id")
+        else:
+            group_id = await _get_cfg("leads_group_id")
 
     if not group_id:
         return
@@ -1710,14 +1716,21 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         raise HTTPException(404, "Маршрут не найден")
 
     branch = route.get("branch", "")
-    if branch == "navoi":
+    branch_group_id   = await db.get_branch_tg_group_id(branch, "tg_delivery_group_id")   if branch else None
+    branch_channel_id = await db.get_branch_tg_group_id(branch, "tg_delivery_channel_id") if branch else None
+    if branch_group_id or branch_channel_id:
+        group_id   = int(branch_group_id)   if branch_group_id   else 0
+        channel_id = int(branch_channel_id) if branch_channel_id else 0
+    elif branch == "navoi":
         group_id_str   = await _get_cfg("delivery_group_navoi_id")   or await _get_cfg("delivery_group_id")
         channel_id_str = await _get_cfg("delivery_channel_navoi_id")
+        group_id   = int(group_id_str)   if group_id_str   else 0
+        channel_id = int(channel_id_str) if channel_id_str else 0
     else:
         group_id_str   = await _get_cfg("delivery_group_zarafshan_id") or await _get_cfg("delivery_group_id")
         channel_id_str = await _get_cfg("delivery_channel_zarafshan_id")
-    group_id   = int(group_id_str)   if group_id_str   else 0
-    channel_id = int(channel_id_str) if channel_id_str else 0
+        group_id   = int(group_id_str)   if group_id_str   else 0
+        channel_id = int(channel_id_str) if channel_id_str else 0
     if not channel_id and not group_id:
         raise HTTPException(400, "Канал/группа водителей не настроены (Настройки → Telegram → Водители)")
 
@@ -3402,7 +3415,11 @@ def branch_ru(branch: str) -> str:
     return BRANCH_RU.get(key, branch.strip("📍 ").strip())
 
 async def _group_id_for_branch(branch: str) -> str:
-    """Возвращает chat_id группы для указанного филиала (из БД или env)."""
+    """Возвращает chat_id группы заказов для указанного филиала: сначала из карточки
+    филиала (tg_orders_channel_id), затем legacy ARTEZ-ключи, затем общий fallback."""
+    branch_group_id = await db.get_branch_tg_group_id(branch, "tg_orders_channel_id") if branch else None
+    if branch_group_id:
+        return str(branch_group_id)
     if branch in ("zarafshan", "Зарафшан"):
         gid = await _get_cfg("tg_group_zarafshan")
         return gid or GROUP_ID

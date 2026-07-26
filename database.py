@@ -8763,6 +8763,17 @@ async def get_branch_by_slug(company_id: int, slug: str):
             "SELECT * FROM branches WHERE company_id=$1 AND slug=$2", company_id, slug
         )
 
+
+_BRANCH_TG_COLUMNS = {"tg_leads_group_id", "tg_orders_channel_id", "tg_delivery_group_id", "tg_delivery_channel_id"}
+
+async def get_branch_tg_group_id(branch_slug: str, column: str):
+    """Читает Telegram group/channel id из карточки филиала (по slug, текущая компания через _cid()).
+    column — строго из белого списка. Возвращает None, если филиал/значение не найдены."""
+    if not pool or not branch_slug or column not in _BRANCH_TG_COLUMNS:
+        return None
+    row = await get_branch_by_slug(_cid(), branch_slug)
+    return row[column] if row else None
+
 async def create_branch(company_id: int, slug: str, name_ru: str, name_uz: str = "",
                          lat=None, lon=None, phones: list = None,
                          workshop_lat=None, workshop_lon=None,
