@@ -4259,9 +4259,12 @@ async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> l
         result.sort(key=lambda x: x["date"], reverse=True)
         return result
 
-async def create_lead(data: dict) -> dict:
+async def create_lead(data: dict, company_id: int | None = None) -> dict:
+    """company_id: явный параметр для вызовов вне обычного request-контекста (например,
+    из order_bot_handlers.py — общий вебхук на все компании, contextvar _cid() там не
+    настроен per-request). Если не передан — берём из contextvar, как раньше."""
     if not pool: return None
-    cid = _cid()
+    cid = company_id if company_id is not None else _cid()
     # Тег акции (только видимость для сотрудников, не расходует окно) — только для
     # лидов с сайта/бота, привязанных к зарегистрированному пользователю с живым окном
     promo_id = None
@@ -7169,60 +7172,6 @@ async def get_services_for_company(company_id: int) -> list[dict]:
         rows = await conn.fetch(
             "SELECT * FROM services WHERE company_id=$1 ORDER BY order_idx, key", company_id)
         return [dict(r) for r in rows]
-
-async def get_next_order_num_for_company(company_id: int, prefix: str) -> str:
-    """Следующий номер заказа, отдельная последовательность на компанию (в отличие от
-    db.get_next_order_num(), который считает по всей таблице orders без company_id —
-    для нескольких компаний это дало бы коллизии номеров)."""
-    if not pool:
-        return f"{prefix}-1001"
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT order_num FROM orders
-            WHERE order_num LIKE $1 AND company_id=$2
-            ORDER BY id DESC LIMIT 1
-        """, f"{prefix}-%", company_id)
-        if row and row["order_num"]:
-            try:
-                last_num = int(row["order_num"].split("-")[-1])
-            except (ValueError, IndexError):
-                last_num = 1000
-        else:
-            last_num = 1000
-        return f"{prefix}-{last_num + 1}"
-
-async def save_bot_order(data: dict, company_id: int) -> str:
-    """Сохраняет 'быстрый заказ' от бота напрямую в orders (без промежуточного лида —
-    в отличие от старого прод-бота, который для quick-заявки слал HTTP POST на
-    /api/bot/lead. Здесь бот и API — один процесс с общим пулом, поэтому пишем прямо
-    в БД; лишний HTTP-хоп к самим себе не нужен и запрещён архитектурой SaaS-бота."""
-    if not pool: return data.get("order_num", "")
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO orders (
-                order_num, company_id, source,
-                client_tg_id, client_tg_username, client_first_name, client_last_name, client_phone,
-                service, status
-            ) VALUES (
-                $1, $2, 'bot',
-                $3, $4, $5, $6, $7,
-                $8, 'new'
-            )
-            ON CONFLICT (order_num) DO NOTHING
-        """,
-            data.get("order_num"), company_id,
-            data.get("client_tg_id"), data.get("client_tg_username"),
-            data.get("client_first_name"), data.get("client_last_name"), data.get("phone"),
-            data.get("service"),
-        )
-        await conn.execute(
-            "UPDATE clients SET total_orders = total_orders + 1, updated_at = NOW() WHERE tg_id=$1 AND company_id=$2",
-            data.get("client_tg_id"), company_id)
-        await conn.execute(
-            "INSERT INTO order_status_history (order_num, new_status, note) VALUES ($1, 'new', 'Заявка создана через бот')",
-            data.get("order_num"))
-    return data.get("order_num", "")
-
 
 async def get_staff_by_role(company_id: int, role: str) -> list:
     """Активные сотрудники компании с указанной ролью (для группового роутинга)."""

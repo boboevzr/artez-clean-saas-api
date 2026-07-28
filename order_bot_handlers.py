@@ -1,17 +1,17 @@
 """Хендлеры бота заказов для клиентов компании — общий Router на всех компаний.
 
 Первый реальный поток, перенесённый из старого монолитного artez_bot/bot.py:
-"быстрый заказ" (QuickForm) — язык → меню → услуга → телефон → имя → заказ создан.
+"быстрый заказ" (QuickForm) — язык → меню → услуга → телефон → имя → лид создан
+(как и в старом прод-боте — сотрудник обрабатывает лид и конвертирует в заказ вручную
+через CRM, бот заказ напрямую не создаёт).
 
 НЕ перенесено (следующий этап): полный заказ (OrderForm) с филиалом/адресом/датой/
 временем/замерами, калькулятор, скидки, долги, водительские колбэки, admin-команды,
 autodial, live-chat. См. artez_bot/artez_bot/bot.py (только чтение, не редактировать).
 
-Архитектурное отличие от прод-бота: там "быстрый заказ" уходил HTTP POST'ом в
-/api/bot/lead (создавался лид, не заказ) — потому что бот и API были разными
-процессами. Здесь бот и API — один процесс с общим пулом БД, поэтому пишем сразу
-в orders напрямую (db.save_bot_order), без промежуточного лида и без HTTP-хопа
-к самим себе.
+Лид создаётся через db.create_lead() — ту же функцию, что использует остальной API
+(admin.html, /api/bot/lead и т.д.), с явным company_id (вебхук общий на все компании,
+request-scoped contextvar _cid() здесь не работает).
 """
 from __future__ import annotations
 
@@ -311,20 +311,18 @@ async def quick_name(message: Message, company_id: int, state: FSMContext) -> No
     uid = message.from_user.id
     saved = False
     try:
-        prefix = f"CO{company_id}"
-        order_num = await db.get_next_order_num_for_company(company_id, prefix)
-        await db.save_bot_order({
-            "order_num":          order_num,
-            "client_tg_id":       uid,
-            "client_tg_username": message.from_user.username,
-            "client_first_name":  name,
-            "client_last_name":   message.from_user.last_name or "",
-            "phone":              data.get("phone", ""),
-            "service":            data.get("service", ""),
+        lead = await db.create_lead({
+            "client_name":  name,
+            "client_phone": data.get("phone", ""),
+            "service":      data.get("service", ""),
+            "note":         "Быстрая заявка (бот)",
+            "status":       "new",
+            "source":       "bot",
+            "client_tg_id": uid,
         }, company_id)
-        saved = True
+        saved = bool(lead)
     except Exception as e:
-        logging.error(f"save_bot_order error: {e}")
+        logging.error(f"create_lead error: {e}")
 
     await state.clear()
     await state.update_data(lang=lang)
