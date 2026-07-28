@@ -10707,12 +10707,11 @@ class OrderBotSetupRequest(BaseModel):
 
 
 @app.post("/api/admin/order-bot/setup")
-async def admin_order_bot_setup(req: OrderBotSetupRequest, _=Depends(_get_admin)):
+async def admin_order_bot_setup(req: OrderBotSetupRequest, cid: int = Depends(_get_admin_cid)):
     """Сохраняет токен бота заказов текущей компании и устанавливает вебхук в Telegram."""
     token = req.token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="Укажите токен")
-    cid = _cid()
     if not APP_URL:
         raise HTTPException(status_code=500, detail="APP_URL не задан на сервере")
     secret = _order_bot_webhook_secret(token)
@@ -10742,8 +10741,7 @@ async def admin_order_bot_setup(req: OrderBotSetupRequest, _=Depends(_get_admin)
 
 
 @app.get("/api/admin/order-bot/status")
-async def admin_order_bot_status(_=Depends(_get_admin)):
-    cid = _cid()
+async def admin_order_bot_status(cid: int = Depends(_get_admin_cid)):
     username = await db.get_config_for_company("order_bot_username", cid)
     return {"ok": True, "connected": bool(username), "username": username}
 
