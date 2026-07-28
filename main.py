@@ -10666,6 +10666,103 @@ async def cleano_tg_webhook(request: Request):
     return {"ok": True}
 
 
+
+# ══════════════════════════════════════
+#  БОТ ЗАКАЗОВ ДЛЯ КЛИЕНТОВ КОМПАНИИ (свой токен на компанию, общий процесс)
+#  "Вариант B2": каждая компания подключает СВОЙ Telegram-бот в admin.html —
+#  один этот процесс обслуживает вебхуки всех компаний одновременно.
+# ══════════════════════════════════════
+
+def _order_bot_webhook_secret(token: str) -> str:
+    return hashlib.sha256(f"order-bot-webhook-{token}".encode()).hexdigest()[:32]
+
+
+_order_bot_instances: dict[str, "Bot"] = {}
+_order_bot_dispatcher = None
+
+
+def _get_order_bot_dispatcher():
+    global _order_bot_dispatcher
+    if _order_bot_dispatcher is None:
+        from aiogram import Dispatcher
+        from order_bot_storage import PostgresStorage
+        from order_bot_handlers import router as order_bot_router
+        _order_bot_dispatcher = Dispatcher(storage=PostgresStorage())
+        _order_bot_dispatcher.include_router(order_bot_router)
+    return _order_bot_dispatcher
+
+
+def _get_order_bot_instance(token: str):
+    from aiogram import Bot
+    from aiogram.client.default import DefaultBotProperties
+    bot = _order_bot_instances.get(token)
+    if bot is None:
+        bot = Bot(token=token, default=DefaultBotProperties(parse_mode="HTML"))
+        _order_bot_instances[token] = bot
+    return bot
+
+
+class OrderBotSetupRequest(BaseModel):
+    token: str
+
+
+@app.post("/api/admin/order-bot/setup")
+async def admin_order_bot_setup(req: OrderBotSetupRequest, _=Depends(_get_admin)):
+    """Сохраняет токен бота заказов текущей компании и устанавливает вебхук в Telegram."""
+    token = req.token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Укажите токен")
+    cid = _cid()
+    if not APP_URL:
+        raise HTTPException(status_code=500, detail="APP_URL не задан на сервере")
+    secret = _order_bot_webhook_secret(token)
+    url = f"{APP_URL}/api/order-bot/webhook/{secret}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            r = await s.post(f"https://api.telegram.org/bot{token}/getMe",
+                              timeout=aiohttp.ClientTimeout(total=10))
+            info = await r.json()
+            if not info.get("ok"):
+                raise HTTPException(status_code=400, detail="Неверный токен бота")
+            username = info["result"]["username"]
+            r2 = await s.post(
+                f"https://api.telegram.org/bot{token}/setWebhook",
+                json={"url": url, "secret_token": secret, "allowed_updates": ["message", "callback_query"]},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            wh = await r2.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ошибка Telegram API: {e}")
+    await db.set_config_for_company("order_bot_token", token, cid)
+    await db.set_config_for_company("order_bot_username", username, cid)
+    await db.set_config_for_company("order_bot_webhook_secret", secret, cid)
+    return {"ok": True, "username": username, "webhook_ok": bool(wh.get("ok"))}
+
+
+@app.get("/api/admin/order-bot/status")
+async def admin_order_bot_status(_=Depends(_get_admin)):
+    cid = _cid()
+    username = await db.get_config_for_company("order_bot_username", cid)
+    return {"ok": True, "connected": bool(username), "username": username}
+
+
+@app.post("/api/order-bot/webhook/{secret}")
+async def order_bot_webhook(secret: str, request: Request):
+    company_id = await db.get_company_id_by_order_bot_secret(secret)
+    if not company_id:
+        return {"ok": True}
+    token = await db.get_config_for_company("order_bot_token", company_id)
+    if not token:
+        return {"ok": True}
+    body = await request.json()
+    bot = _get_order_bot_instance(token)
+    dp = _get_order_bot_dispatcher()
+    result = await dp.feed_webhook_update(bot, body, company_id=company_id)
+    return result.model_dump(exclude_none=True) if result else {"ok": True}
+
+
 @app.get("/api/saas/phone-verify-status")
 async def cleano_phone_verify_status(phone: str):
     phone = normalize_phone(phone)

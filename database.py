@@ -239,6 +239,12 @@ async def create_tables():
 
     # Опциональные миграции других таблиц — каждый отдельно чтобы не блокировать
     other_migrations = [
+        """CREATE TABLE IF NOT EXISTS bot_fsm_state (
+            key        TEXT PRIMARY KEY,
+            state      TEXT,
+            data       JSONB NOT NULL DEFAULT '{}',
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )""",
         "ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL",
         "ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_source_check",
         "ALTER TABLE orders ADD CONSTRAINT orders_source_check CHECK (source IN ('bot','site','staff'))",
@@ -2386,6 +2392,15 @@ async def set_config_for_company(key: str, value: str, company_id: int):
             INSERT INTO config (key, value, company_id, updated_at) VALUES ($1, $2, $3, NOW())
             ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
         """, key, value, company_id)
+
+
+async def get_company_id_by_order_bot_secret(secret: str) -> int | None:
+    """Обратный поиск company_id по секрету вебхука бота заказов —
+    для роутинга входящих Telegram-апдейтов на /api/order-bot/webhook/{secret}."""
+    if not pool or not secret: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT company_id FROM config WHERE key='order_bot_webhook_secret' AND value=$1", secret)
 
 
 # ══════════════════════════════════════
