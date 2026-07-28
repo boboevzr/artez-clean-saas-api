@@ -10741,7 +10741,8 @@ async def admin_order_bot_setup(req: OrderBotSetupRequest, cid: int = Depends(_g
 @app.get("/api/admin/order-bot/status")
 async def admin_order_bot_status(cid: int = Depends(_get_admin_cid)):
     username = await db.get_config_for_company("order_bot_username", cid)
-    return {"ok": True, "connected": bool(username), "username": username}
+    token = await db.get_config_for_company("order_bot_token", cid)
+    return {"ok": True, "connected": bool(username), "username": username, "token": token or ""}
 
 
 @app.post("/api/order-bot/webhook/{secret}")
