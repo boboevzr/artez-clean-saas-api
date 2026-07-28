@@ -10756,6 +10756,9 @@ async def order_bot_webhook(secret: str, request: Request):
     token = await db.get_config_for_company("order_bot_token", company_id)
     if not token:
         return {"ok": True}
+    got_secret = request.headers.get("x-telegram-bot-api-secret-token", "")
+    if not secrets.compare_digest(got_secret, secret):
+        raise HTTPException(status_code=403, detail="Invalid secret token")
     body = await request.json()
     bot = _get_order_bot_instance(token)
     dp = _get_order_bot_dispatcher()
