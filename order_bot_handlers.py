@@ -23,6 +23,7 @@ request-scoped contextvar _cid() здесь не работает).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -322,6 +323,21 @@ async def _resolve_lang(tg_id: int, company_id: int, state: FSMContext) -> str |
     return lang if lang in ("ru", "uz") else None
 
 
+def _notify_staff_new_lead(lead: dict) -> None:
+    """Уведомляет сотрудников (веб-пуш + TG-группа филиала) о новом лиде из бота —
+    та же функция, что и для лидов с сайта/CRM (admin.html, /api/bot/lead). Ленивый
+    импорт из main — на момент вызова (внутри уже обработанного вебхука) main.py
+    полностью загружен, обратный импорт на уровне модуля не нужен."""
+    if not lead:
+        return
+    try:
+        from main import _notify_new_lead
+        bot_staff = {"role": "bot", "first_name": "Telegram", "last_name": "", "login": "bot"}
+        asyncio.create_task(_notify_new_lead(lead, bot_staff))
+    except Exception as e:
+        logging.warning(f"_notify_staff_new_lead error: {e}")
+
+
 # ══════════════════════════════════════
 #  /start и язык
 # ══════════════════════════════════════
@@ -473,6 +489,9 @@ async def quick_name(message: Message, company_id: int, state: FSMContext) -> No
         saved = bool(lead)
     except Exception as e:
         logging.error(f"create_lead error: {e}")
+
+    if saved:
+        _notify_staff_new_lead(lead)
 
     await state.clear()
     await state.update_data(lang=lang)
@@ -679,6 +698,9 @@ async def _finish_full_order(message: Message, company_id: int, state: FSMContex
         saved = bool(lead)
     except Exception as e:
         logging.error(f"create_lead error (full order): {e}")
+
+    if saved:
+        _notify_staff_new_lead(lead)
 
     await state.clear()
     await state.update_data(lang=lang)
