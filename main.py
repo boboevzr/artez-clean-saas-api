@@ -4494,7 +4494,8 @@ async def _render_order_receipt(order_id: int) -> tuple[bytes, dict]:
     slogan      = _substitute_receipt_tokens(await _get_cfg("receipt_slogan"), order, grand_total)
     footer_note = _substitute_receipt_tokens(await _get_cfg("receipt_footer_note"), order, grand_total)
 
-    bot_link = (await _get_cfg("social_tg_bot")).replace("https://", "").replace("http://", "")
+    order_bot_username = await _get_cfg("order_bot_username")
+    bot_link = f"t.me/{order_bot_username}" if order_bot_username else ""
 
     jpeg_bytes = receipt.generate_receipt_jpeg(order, items, branch_contacts,
                                                 header_text, slogan, footer_note,
@@ -4617,7 +4618,8 @@ async def preview_receipt(body: dict, _=Depends(get_admin)):
     slogan      = _substitute_receipt_tokens(slogan, mock_order, grand_total)
     footer_note = _substitute_receipt_tokens(footer_note, mock_order, grand_total)
     contacts = [c for c in (await _get_cfg("contact_main"), await _get_cfg("contact_zarafshan_1")) if c]
-    bot_link = (await _get_cfg("social_tg_bot")).replace("https://", "").replace("http://", "")
+    order_bot_username = await _get_cfg("order_bot_username")
+    bot_link = f"t.me/{order_bot_username}" if order_bot_username else ""
     jpeg_bytes = receipt.generate_receipt_jpeg(mock_order, mock_items, contacts, header_text, slogan, footer_note,
                                                 bot_link)
     return Response(content=jpeg_bytes, media_type="image/jpeg")
@@ -7609,7 +7611,6 @@ async def save_delivery_discount(discount: float = Body(..., embed=True), _=Depe
 SITE_SETTINGS_DEFAULTS = {
     # Соцсети (каждая компания заполняет свои)
     "social_instagram":    "",
-    "social_tg_bot":       "",
     "social_tg_group":     "",
     # Контакты
     "contact_short":       "",
@@ -7630,7 +7631,6 @@ SITE_SETTINGS_DEFAULTS = {
     "contact_navoi_instagram":     "",
     "branch_navoi_location":       "",
     # Telegram бот (настраивается каждой компанией)
-    "tg_bot_token":        "",
     "tg_group_id":         "",
     "tg_group_zarafshan":  "",
     "tg_group_navoi":      "",
@@ -7716,7 +7716,7 @@ async def get_site_settings(company_slug: str = None):
     cid = await _resolve_client_company_id(company_slug)
     db.set_request_company(cid)
     PUBLIC_KEYS = [
-        "social_instagram", "social_tg_bot", "social_tg_group",
+        "social_instagram", "social_tg_group", "order_bot_username",
         "contact_short", "contact_main", "contact_email",
         "contact_zarafshan_1", "contact_zarafshan_2", "contact_zarafshan_telegram", "contact_zarafshan_admin_tg", "contact_zarafshan_whatsapp", "contact_zarafshan_instagram",
         "contact_navoi_1", "contact_navoi_2", "contact_navoi_telegram", "contact_navoi_admin_tg", "contact_navoi_whatsapp", "contact_navoi_instagram",
@@ -7738,7 +7738,6 @@ async def get_site_settings(company_slug: str = None):
 
 class SiteSettings(BaseModel):
     social_instagram:    str | None = None
-    social_tg_bot:       str | None = None
     social_tg_group:     str | None = None
     contact_short:       str | None = None
     contact_main:        str | None = None
@@ -7765,7 +7764,6 @@ class SiteSettings(BaseModel):
     delivery_channel_zarafshan_link:  str | None = None
     delivery_channel_navoi_link:      str | None = None
     delivery_group_template:          str | None = None
-    tg_bot_token:        str | None = None
     tg_group_id:         str | None = None
     tg_group_zarafshan:  str | None = None
     tg_group_navoi:      str | None = None
@@ -8513,16 +8511,16 @@ async def del_template(tid: int, staff=Depends(get_current_staff)):
 
 
 @app.post("/api/admin/bot/broadcast-restart")
-async def bot_broadcast_restart(_=Depends(_get_admin)):
-    """Рассылает всем клиентам бота сообщение «Нажмите /start»."""
-    token = await _get_cfg("tg_bot_token") or BOT_TOKEN
+async def bot_broadcast_restart(cid: int = Depends(_get_admin_cid)):
+    """Рассылает всем клиентам бота заказов компании сообщение «Нажмите /start»."""
+    token = await db.get_config_for_company("order_bot_token", cid)
     if not token:
-        raise HTTPException(status_code=503, detail="BOT_TOKEN не настроен")
+        raise HTTPException(status_code=400, detail="Бот для клиентов не подключён")
     tg_ids = await db.get_all_bot_client_tg_ids()
     if not tg_ids:
         return {"ok": True, "sent": 0, "failed": 0, "total": 0}
     text = (
-        "🔄 <b>Бот ARTEZ обновлён!</b>\n\n"
+        "🔄 <b>Бот обновлён!</b>\n\n"
         "Для продолжения нажмите /start"
     )
     sent = failed = 0
