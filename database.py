@@ -245,6 +245,32 @@ async def create_tables():
             data       JSONB NOT NULL DEFAULT '{}',
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )""",
+        # Клиенты бота заказов (order_bot_handlers.py). На проде (ARTEZ) эта таблица уже
+        # существует с более старой эпохи (single-tenant artez_bot) и там UNIQUE(tg_id)
+        # ГЛОБАЛЬНЫЙ (не per-company) — здесь CREATE IF NOT EXISTS её не трогает.
+        # Для гринфилд-компаний (свежая БД) создаём сразу с company-scoped уникальностью.
+        """CREATE TABLE IF NOT EXISTS clients (
+            id           SERIAL PRIMARY KEY,
+            company_id   INTEGER REFERENCES companies(id) DEFAULT 1,
+            tg_id        BIGINT NOT NULL,
+            tg_username  VARCHAR(100),
+            first_name   VARCHAR(100),
+            last_name    VARCHAR(100),
+            phone        VARCHAR(20),
+            lang         VARCHAR(5) DEFAULT 'ru',
+            total_orders INT DEFAULT 0,
+            created_at   TIMESTAMPTZ DEFAULT NOW(),
+            updated_at   TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(company_id, tg_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_clients_company ON clients(company_id)",
+        # На проде эта таблица уже существовала (создана Option A-ботом до этой миграции)
+        # БЕЗ company_id и с ГЛОБАЛЬНЫМ UNIQUE(tg_id) — CREATE TABLE IF NOT EXISTS выше
+        # был no-op. Дотягиваем существующую таблицу до company-scoped схемы вручную.
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES companies(id) DEFAULT 1",
+        "UPDATE clients SET company_id = 1 WHERE company_id IS NULL",
+        "ALTER TABLE clients DROP CONSTRAINT IF EXISTS clients_tg_id_key",
+        "ALTER TABLE clients ADD CONSTRAINT clients_company_tg_uq UNIQUE (company_id, tg_id)",
         "ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL",
         "ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_source_check",
         "ALTER TABLE orders ADD CONSTRAINT orders_source_check CHECK (source IN ('bot','site','staff'))",
@@ -7086,6 +7112,117 @@ async def get_managers_with_push(company_id: int) -> list:
               AND tg_id IS NOT NULL AND company_id=$1
         """, company_id)
         return [dict(r) for r in rows]
+
+# ── Бот заказов: быстрый заказ (order_bot_handlers.py) ──────────────────────
+# clients — собственная таблица бота (НЕ crm_clients, это отдельная общая CRM-
+# таблица для админки). company_id передаётся явным параметром, как и выше.
+
+async def upsert_bot_client(tg_id: int, company_id: int, username: str | None,
+                             first_name: str | None, last_name: str | None,
+                             phone: str | None = None, lang: str = "ru") -> None:
+    """Создаёт/обновляет клиента бота. Без ON CONFLICT на конкретный constraint —
+    прод-таблица clients (наследие single-tenant artez_bot) имеет ГЛОБАЛЬНЫЙ
+    UNIQUE(tg_id), а не UNIQUE(company_id, tg_id) — см. комментарий в create_tables().
+    """
+    if not pool: return
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT id FROM clients WHERE tg_id=$1 AND company_id=$2", tg_id, company_id)
+        if existing:
+            await conn.execute("""
+                UPDATE clients SET tg_username=$1, first_name=$2, last_name=$3, lang=$4,
+                       phone=COALESCE($5, phone), updated_at=NOW()
+                WHERE tg_id=$6 AND company_id=$7
+            """, username, first_name, last_name, lang, phone, tg_id, company_id)
+        else:
+            await conn.execute("""
+                INSERT INTO clients (tg_id, company_id, tg_username, first_name, last_name, phone, lang, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            """, tg_id, company_id, username, first_name, last_name, phone, lang)
+
+async def get_bot_client_by_tg_id(tg_id: int, company_id: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM clients WHERE tg_id=$1 AND company_id=$2", tg_id, company_id)
+        return dict(row) if row else None
+
+async def get_bot_client_lang(tg_id: int, company_id: int) -> str | None:
+    """Сохранённый язык клиента бота ('ru'/'uz') или None, если клиент не найден."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT lang FROM clients WHERE tg_id=$1 AND company_id=$2", tg_id, company_id)
+        return row["lang"] if row else None
+
+async def set_bot_client_lang(tg_id: int, lang: str, company_id: int) -> None:
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE clients SET lang=$1, updated_at=NOW() WHERE tg_id=$2 AND company_id=$3",
+            lang, tg_id, company_id)
+
+async def get_services_for_company(company_id: int) -> list[dict]:
+    """Список услуг компании (для клавиатуры выбора услуги в боте)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM services WHERE company_id=$1 ORDER BY order_idx, key", company_id)
+        return [dict(r) for r in rows]
+
+async def get_next_order_num_for_company(company_id: int, prefix: str) -> str:
+    """Следующий номер заказа, отдельная последовательность на компанию (в отличие от
+    db.get_next_order_num(), который считает по всей таблице orders без company_id —
+    для нескольких компаний это дало бы коллизии номеров)."""
+    if not pool:
+        return f"{prefix}-1001"
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT order_num FROM orders
+            WHERE order_num LIKE $1 AND company_id=$2
+            ORDER BY id DESC LIMIT 1
+        """, f"{prefix}-%", company_id)
+        if row and row["order_num"]:
+            try:
+                last_num = int(row["order_num"].split("-")[-1])
+            except (ValueError, IndexError):
+                last_num = 1000
+        else:
+            last_num = 1000
+        return f"{prefix}-{last_num + 1}"
+
+async def save_bot_order(data: dict, company_id: int) -> str:
+    """Сохраняет 'быстрый заказ' от бота напрямую в orders (без промежуточного лида —
+    в отличие от старого прод-бота, который для quick-заявки слал HTTP POST на
+    /api/bot/lead. Здесь бот и API — один процесс с общим пулом, поэтому пишем прямо
+    в БД; лишний HTTP-хоп к самим себе не нужен и запрещён архитектурой SaaS-бота."""
+    if not pool: return data.get("order_num", "")
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO orders (
+                order_num, company_id, source,
+                client_tg_id, client_tg_username, client_first_name, client_last_name, client_phone,
+                service, status
+            ) VALUES (
+                $1, $2, 'bot',
+                $3, $4, $5, $6, $7,
+                $8, 'new'
+            )
+            ON CONFLICT (order_num) DO NOTHING
+        """,
+            data.get("order_num"), company_id,
+            data.get("client_tg_id"), data.get("client_tg_username"),
+            data.get("client_first_name"), data.get("client_last_name"), data.get("phone"),
+            data.get("service"),
+        )
+        await conn.execute(
+            "UPDATE clients SET total_orders = total_orders + 1, updated_at = NOW() WHERE tg_id=$1 AND company_id=$2",
+            data.get("client_tg_id"), company_id)
+        await conn.execute(
+            "INSERT INTO order_status_history (order_num, new_status, note) VALUES ($1, 'new', 'Заявка создана через бот')",
+            data.get("order_num"))
+    return data.get("order_num", "")
+
 
 async def get_staff_by_role(company_id: int, role: str) -> list:
     """Активные сотрудники компании с указанной ролью (для группового роутинга)."""
