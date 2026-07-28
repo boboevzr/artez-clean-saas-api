@@ -3032,6 +3032,21 @@ async def get_staff_by_tg_id(tg_id):
             except Exception:
                 return None
 
+async def get_staff_by_tg_id_and_company(tg_id, company_id: int):
+    """Как get_staff_by_tg_id, но со явным company_id — для бота заказов (вебхук общий
+    на все компании, свою компанию узнаём из URL, не из contextvar)."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        try:
+            return await conn.fetchrow(
+                "SELECT * FROM staff WHERE tg_id=$1 AND company_id=$2 AND active=TRUE", int(tg_id), company_id)
+        except Exception:
+            try:
+                return await conn.fetchrow(
+                    "SELECT * FROM staff WHERE tg_id::text=$1 AND company_id=$2 AND active=TRUE", str(tg_id), company_id)
+            except Exception:
+                return None
+
 async def create_agent_from_user(user: dict, password_hash: str, branch: str = "") -> int:
     """Создаёт staff-аккаунт агента из пользователя сайта, авто-назначает зарплату 'leads'."""
     if not pool: return None

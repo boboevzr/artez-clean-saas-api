@@ -11,7 +11,9 @@
   вместо хардкода "zarafshan"/"navoi".
 
 В обоих случаях — сотрудник обрабатывает лид и конвертирует его в заказ вручную
-через CRM, бот заказ напрямую не создаёт.
+через CRM, бот заказ напрямую не создаёт. После создания лида сотрудники получают
+push + сообщение в TG-группу филиала с кнопкой «Взять лид» (см. cb_take_lead —
+использует db.take_lead(), уже company_id-aware).
 
 НЕ перенесено (следующий этап): калькулятор площади/суммы, скидки, долги,
 водительские колбэки, admin-команды, autodial, live-chat.
@@ -745,6 +747,62 @@ async def full_time_to(call: CallbackQuery, company_id: int, state: FSMContext) 
     to_h = int(call.data.split("_")[-1])
     time_txt = f"{from_h:02d}:00 — {to_h:02d}:00"
     await _finish_full_order(call.message, company_id, state, time_txt, call.from_user)
+
+
+# ══════════════════════════════════════
+#  СОТРУДНИКИ: «Взять лид» — кнопка в уведомлении о новом лиде (_notify_new_lead,
+#  main.py). Логика зеркалит /api/tg/webhook (легаси, single-tenant), но здесь —
+#  через db.take_lead(), уже принимающий явный company_id.
+# ══════════════════════════════════════
+@router.callback_query(F.data.startswith("take_lead_"))
+async def cb_take_lead(call: CallbackQuery, company_id: int) -> None:
+    try:
+        lead_id = int(call.data.replace("take_lead_", ""))
+    except ValueError:
+        await call.answer("Ошибка", show_alert=True)
+        return
+
+    staff = await db.get_staff_by_tg_id_and_company(call.from_user.id, company_id)
+    if not staff:
+        await call.answer("Ваш Telegram не привязан к аккаунту сотрудника.", show_alert=True)
+        return
+    if staff.get("role") == "agent":
+        await call.answer("Агенты не могут брать лиды через Telegram.", show_alert=True)
+        return
+
+    staff_id = staff["id"]
+    staff_name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get("login", "")
+
+    try:
+        status, taker_name, taker_verb = await db.take_lead(lead_id, staff_id, staff_name, company_id)
+    except Exception as e:
+        logging.error(f"take_lead error: {e}")
+        await call.answer("Ошибка сервера. Попробуйте ещё раз.", show_alert=True)
+        return
+
+    orig_text = call.message.text or call.message.caption or ""
+
+    if status == "not_found":
+        await call.answer("Лид не найден", show_alert=True)
+    elif status == "taken":
+        await call.answer(f"Лид уже взят: {taker_name or 'другой сотрудник'}", show_alert=True)
+        new_text = orig_text.rstrip("━").rstrip() + f"\n━━━━━━━━━━\n✅ {taker_verb}: {taker_name or 'другой сотрудник'}"
+        try:
+            await call.message.edit_text(new_text)
+        except Exception:
+            pass
+    elif status == "already_mine":
+        await call.answer("Этот лид уже ваш!")
+    elif status == "ok":
+        took_verb = "Взяла" if staff.get("gender") == "F" else "Взял"
+        await call.answer("Лид взят! Откройте приложение.")
+        new_text = orig_text.rstrip("━").rstrip() + f"\n━━━━━━━━━━\n✅ {took_verb}: {staff_name}"
+        try:
+            await call.message.edit_text(new_text)
+        except Exception:
+            pass
+    else:
+        await call.answer("Ошибка сервера. Попробуйте ещё раз.", show_alert=True)
 
 
 # ══════════════════════════════════════

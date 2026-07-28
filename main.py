@@ -674,7 +674,11 @@ async def _notify_new_lead(lead: dict, staff: dict):
         ]]}
 
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        lead_company_id = lead.get("company_id")
+        token = await db.get_config_for_company("order_bot_token", lead_company_id) if lead_company_id else None
+        if not token:
+            return  # у компании ещё не подключён бот заказов — некому слать уведомление
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {
             "chat_id": str(group_id),
             "text": msg_text,
