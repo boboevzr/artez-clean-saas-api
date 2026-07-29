@@ -871,13 +871,17 @@ async def quick_service(call: CallbackQuery, company_id: int, state: FSMContext)
     await call.message.answer(t(lang, "ask_phone"), reply_markup=phone_kb(lang))
 
 
-async def _finish_phone_step(message: Message, company_id: int, state: FSMContext, phone: str) -> None:
+async def _finish_phone_step(message: Message, company_id: int, state: FSMContext, phone: str, verified: bool = False) -> None:
     data = await state.get_data()
     lang = data.get("lang", "ru")
     await state.update_data(phone=phone)
     # Сохраняем телефон в clients — иначе «Мой профиль» никогда не узнает номер
     # (upsert_bot_client в /start вызывается без phone). COALESCE в самом
     # upsert_bot_client не даст затереть уже сохранённый номер пустым.
+    # tg_phone передаём ТОЛЬКО когда номер пришёл через «Поделиться контактом» и
+    # проверен (contact.user_id == from_user.id) — см. quick_phone_contact.
+    # Он используется как ключ поиска чужих заказов в «Статус заказа»/«Профиль»,
+    # поэтому ручной ввод (quick_phone_text) НИКОГДА не должен его передавать.
     try:
         await db.upsert_bot_client(
             tg_id=message.from_user.id, company_id=company_id,
@@ -885,6 +889,7 @@ async def _finish_phone_step(message: Message, company_id: int, state: FSMContex
             first_name=message.from_user.first_name,
             last_name=message.from_user.last_name,
             phone=phone, lang=lang,
+            tg_phone=phone if verified else None,
         )
     except Exception as e:
         logging.warning(f"upsert_bot_client (phone) error: {e}")
@@ -897,11 +902,14 @@ async def _finish_phone_step(message: Message, company_id: int, state: FSMContex
 async def quick_phone_contact(message: Message, company_id: int, state: FSMContext) -> None:
     data = await state.get_data()
     lang = data.get("lang", "ru")
+    # Клиент мог переслать ЧУЖОЙ контакт (Telegram это разрешает) — засчитываем как
+    # верифицированный (tg_phone) только если это его собственный номер.
+    is_own = message.contact.user_id == message.from_user.id
     norm = normalize_phone_bot(message.contact.phone_number or "")
     if not norm:
         await message.answer(t(lang, "phone_invalid"), reply_markup=phone_kb(lang))
         return
-    await _finish_phone_step(message, company_id, state, norm)
+    await _finish_phone_step(message, company_id, state, norm, verified=is_own)
 
 
 @router.message(QuickForm.phone, F.text)
@@ -981,7 +989,7 @@ async def full_name(message: Message, company_id: int, state: FSMContext) -> Non
     await message.answer(t(lang, "ask_phone"), reply_markup=phone_kb(lang))
 
 
-async def _advance_after_phone(message: Message, company_id: int, state: FSMContext, phone: str) -> None:
+async def _advance_after_phone(message: Message, company_id: int, state: FSMContext, phone: str, verified: bool = False) -> None:
     data = await state.get_data()
     lang = data.get("lang", "ru")
     await state.update_data(phone=phone)
@@ -993,6 +1001,7 @@ async def _advance_after_phone(message: Message, company_id: int, state: FSMCont
             first_name=message.from_user.first_name,
             last_name=message.from_user.last_name,
             phone=phone, lang=lang,
+            tg_phone=phone if verified else None,
         )
     except Exception as e:
         logging.warning(f"upsert_bot_client (phone) error: {e}")
@@ -1015,11 +1024,12 @@ async def _advance_after_phone(message: Message, company_id: int, state: FSMCont
 async def full_phone_contact(message: Message, company_id: int, state: FSMContext) -> None:
     data = await state.get_data()
     lang = data.get("lang", "ru")
+    is_own = message.contact.user_id == message.from_user.id
     norm = normalize_phone_bot(message.contact.phone_number or "")
     if not norm:
         await message.answer(t(lang, "phone_invalid"), reply_markup=phone_kb(lang))
         return
-    await _advance_after_phone(message, company_id, state, norm)
+    await _advance_after_phone(message, company_id, state, norm, verified=is_own)
 
 
 @router.message(OrderForm.phone, F.text)
@@ -1381,12 +1391,19 @@ async def calc_length(message: Message, company_id: int, state: FSMContext) -> N
 #                 существует, но заказ из него ещё не создан сотрудником.
 #  - 🔄 В работе = заказы (orders), НЕ delivered/cancelled — найдены НЕ по
 #                 client_tg_id (при конвертации лида в заказ client_tg_id не
-#                 копируется, см. convert_lead_to_order в main.py), а по ЛЮБОМУ
-#                 телефону, который клиент когда-либо указывал: свой профильный
-#                 (clients.phone) + все телефоны с его же лидов — клиент мог
-#                 при заказе назвать другой номер, не тот что в Telegram.
-#  - ✅ Выполнено = заказы со статусом delivered (по тем же телефонам).
+#                 копируется, см. convert_lead_to_order в main.py), а по
+#                 clients.tg_phone — телефону клиента, ВЕРИФИЦИРОВАННОМУ через
+#                 «Поделиться номером» в Telegram (contact.user_id проверен
+#                 в quick_phone_contact/full_phone_contact).
+#  - ✅ Выполнено = заказы со статусом delivered (по тому же телефону).
 #  - ❌ Отменены  = лиды со статусом lost + заказы со статусом cancelled.
+#
+#  ⚠️ БЕЗОПАСНОСТЬ: раньше сюда же добавлялись телефоны из СОБСТВЕННЫХ лидов
+#  клиента (client_phone на leads) и обычный clients.phone (мог быть введён
+#  вручную) — это позволяло любому клиенту вписать ЧУЖОЙ номер телефона (свой
+#  или через фейковый лид) и увидеть чужие заказы/статусы. Используем ТОЛЬКО
+#  clients.tg_phone — его нельзя подделать, Telegram сам не даст поделиться
+#  чужим контактом через кнопку request_contact, а ручной ввод его не трогает.
 # ══════════════════════════════════════
 async def _gather_status_data(uid: int, company_id: int) -> tuple[list[dict], list[dict]]:
     try:
@@ -1395,19 +1412,15 @@ async def _gather_status_data(uid: int, company_id: int) -> tuple[list[dict], li
         logging.warning(f"get_client_leads_by_tg error: {e}")
         leads = []
 
-    phones = set()
     try:
         client = await db.get_bot_client_by_tg_id(uid, company_id)
-        if client and client.get("phone"):
-            phones.add(client["phone"])
+        verified_phone = (client or {}).get("tg_phone")
     except Exception as e:
         logging.warning(f"get_bot_client_by_tg_id error: {e}")
-    for l in leads:
-        if l.get("client_phone"):
-            phones.add(l["client_phone"])
+        verified_phone = None
 
     try:
-        orders = await db.get_orders_by_phones(list(phones), company_id) if phones else []
+        orders = await db.get_orders_by_phones([verified_phone], company_id) if verified_phone else []
     except Exception as e:
         logging.warning(f"get_orders_by_phones error: {e}")
         orders = []
@@ -1657,7 +1670,15 @@ async def operator_message(message: Message, company_id: int, state: FSMContext)
 @router.callback_query(F.data.startswith("reply_to_"))
 async def admin_reply_start(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
     """Сотрудник (не клиент!) нажал «Ответить клиенту» в группе — FSM-ключ здесь
-    строится по (chat_id группы, tg_id сотрудника), см. PostgresStorage."""
+    строится по (chat_id группы, tg_id сотрудника), см. PostgresStorage.
+
+    БЕЗОПАСНОСТЬ: без этой проверки ЛЮБОЙ участник группы (не обязательно
+    сотрудник) мог нажать кнопку и написать клиенту сообщение от имени
+    компании — см. cb_take_lead, тот же паттерн проверки."""
+    staff = await db.get_staff_by_tg_id_and_company(call.from_user.id, company_id)
+    if not staff:
+        await call.answer("Ваш Telegram не привязан к аккаунту сотрудника.", show_alert=True)
+        return
     await call.answer()
     try:
         client_id = int(call.data.replace("reply_to_", ""))

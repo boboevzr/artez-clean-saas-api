@@ -7137,11 +7137,19 @@ async def get_managers_with_push(company_id: int) -> list:
 
 async def upsert_bot_client(tg_id: int, company_id: int, username: str | None,
                              first_name: str | None, last_name: str | None,
-                             phone: str | None = None, lang: str = "ru") -> None:
+                             phone: str | None = None, lang: str = "ru",
+                             tg_phone: str | None = None) -> None:
     """Создаёт/обновляет клиента бота. Без ON CONFLICT на конкретный constraint —
     прод-таблица clients (наследие single-tenant artez_bot) имеет ГЛОБАЛЬНЫЙ
     UNIQUE(tg_id), а не UNIQUE(company_id, tg_id) — см. комментарий в create_tables().
-    """
+
+    phone — обычный контактный номер (для связи, может быть введён вручную —
+    клиент мог указать номер, который не принадлежит ему). tg_phone — ВЕРИФИЦИРОВАННЫЙ
+    номер: передаётся ТОЛЬКО когда клиент реально поделился СВОИМ контактом через
+    Telegram (проверено по contact.user_id == from_user.id), никогда при ручном
+    вводе. Только tg_phone можно использовать как ключ поиска чужих данных
+    («Статус заказа») — иначе любой мог бы вписать номер другого человека и
+    увидеть его заказы (см. security-фикс 2026-07-29)."""
     if not pool: return
     async with pool.acquire() as conn:
         existing = await conn.fetchrow(
@@ -7149,14 +7157,14 @@ async def upsert_bot_client(tg_id: int, company_id: int, username: str | None,
         if existing:
             await conn.execute("""
                 UPDATE clients SET tg_username=$1, first_name=$2, last_name=$3, lang=$4,
-                       phone=COALESCE($5, phone), updated_at=NOW()
-                WHERE tg_id=$6 AND company_id=$7
-            """, username, first_name, last_name, lang, phone, tg_id, company_id)
+                       phone=COALESCE($5, phone), tg_phone=COALESCE($6, tg_phone), updated_at=NOW()
+                WHERE tg_id=$7 AND company_id=$8
+            """, username, first_name, last_name, lang, phone, tg_phone, tg_id, company_id)
         else:
             await conn.execute("""
-                INSERT INTO clients (tg_id, company_id, tg_username, first_name, last_name, phone, lang, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-            """, tg_id, company_id, username, first_name, last_name, phone, lang)
+                INSERT INTO clients (tg_id, company_id, tg_username, first_name, last_name, phone, tg_phone, lang, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            """, tg_id, company_id, username, first_name, last_name, phone, tg_phone, lang)
 
 async def get_bot_client_by_tg_id(tg_id: int, company_id: int) -> dict | None:
     if not pool: return None
