@@ -7428,14 +7428,19 @@ async def resolve_debt_approval(request_id: int, resolution: str, resolved_by: i
                 r['order_id'])
         return r
 
-async def get_routes_today(branch: str | None = None) -> list:
+async def get_routes_today(company_id: int, branch: str | None = None) -> list:
+    # company_id ОБЯЗАТЕЛЕН — раньше запрос фильтровался только по дате и
+    # (опционально) branch, БЕЗ company_id вообще: водитель без указанного
+    # branch увидел бы маршруты/заказы/телефоны клиентов ВСЕХ компаний SaaS
+    # за сегодня; даже с branch — две компании с одинаковым названием филиала
+    # смешались бы (см. security-фикс 2026-07-29, тот же класс IDOR).
     if not pool: return []
     async with pool.acquire() as conn:
-        where_clause = "WHERE r.date = CURRENT_DATE AND r.status != 'cancelled'"
-        vals = []
+        where_clause = "WHERE r.company_id = $1 AND r.date = CURRENT_DATE AND r.status != 'cancelled'"
+        vals = [company_id]
         if branch:
-            where_clause += " AND r.branch = $1"
-            vals = [branch]
+            where_clause += " AND r.branch = $2"
+            vals.append(branch)
         rows = await conn.fetch(f"""
             SELECT r.id AS route_id, r.name, r.date::text, r.type, r.status AS route_status, r.branch,
                    TRIM(COALESCE(s.first_name,'') || ' ' || COALESCE(s.last_name,'')) AS driver_name,

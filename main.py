@@ -7075,7 +7075,7 @@ async def get_my_route(staff=Depends(get_current_staff)):
     if not _can_drive(staff):
         raise HTTPException(403, "Нет доступа")
     await db.roll_forward_stale_routes()
-    routes = await db.get_routes_today(staff.get("branch"))
+    routes = await db.get_routes_today(staff["company_id"], staff.get("branch"))
     payment_events = []
     try:
         async with db.pool.acquire() as conn:
