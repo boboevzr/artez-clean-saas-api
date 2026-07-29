@@ -25,8 +25,12 @@ push + сообщение в TG-группу филиала с кнопкой «
 касса, водительские маршруты — в SaaS для этого уже есть веб/PWA (staff.html), но
 пользователь хочет продублировать и в боте, просто не сейчас. См. память проекта
 (project_artez_bot_saas_migration) за деталями/находками для этого этапа.
-Также не перенесены: admin-команды, autodial, live-chat, агентская программа —
-вне рамок текущей миграции. См. artez_bot/artez_bot/bot.py (только чтение).
+Также не перенесены: admin-команды, autodial, live-chat — вне рамок текущей
+миграции. См. artez_bot/artez_bot/bot.py (только чтение).
+
+«Стать Агентом» (menu_agent/agent_confirm/agent_contact_received, конец файла)
+перенесена и использует company-scoped _agent_status_for_bot/_agent_apply_for_bot
+из main.py напрямую (тот же процесс, без HTTP-петли на себя же).
 
 ВАЖНО: echo_fallback ограничен приватными чатами (F.chat.type == "private") — бот
 теперь состоит в группе лидов компании (уведомления/«Взять лид»/«Оператор»), и без
@@ -107,6 +111,12 @@ class AdminReplyForm(StatesGroup):
     (в ТОЙ ЖЕ группе, от того же tg_id — FSM-ключ включает chat_id+user_id,
     см. order_bot_storage.PostgresStorage) пересылается клиенту."""
     waiting_reply = State()
+
+
+class AgentForm(StatesGroup):
+    """«Стать Агентом» — если верифицированный tg_phone ещё не известен, просим
+    поделиться контактом, чтобы найти аккаунт сайта той же компании."""
+    waiting_contact = State()
 
 
 # Группировка статусов заказа для раздела «Статус заказа» — перенесено из
@@ -250,6 +260,19 @@ T = {
         "prices_title":   "💰 Цены",
         "prices_empty":   "⚠️ Цены ещё не настроены. Обратитесь в компанию.",
         "prices_min_order_line": "📦 Мин. заказ: {min_order} {unit}",
+
+        # ── Стать Агентом ──
+        "btn_agent":      "🤝 Стать Агентом",
+        "agent_info_text": "🤝 <b>Стать Агентом</b>\n\nАгенты привлекают клиентов и получают комиссию с каждого заказа.\n\n📋 Условия:\n• Быть зарегистрированным на сайте компании\n• Приводить клиентов по реферальной ссылке\n• Размер комиссии: зависит от суммы заказа\n\nНажмите «Подтвердить», чтобы продолжить:",
+        "btn_agent_confirm": "✅ Подтвердить — Стать Агентом",
+        "agent_checking": "⏳ Проверяем…",
+        "agent_ask_contact": "🤝 Стать Агентом\n\nАккаунт на сайте не найден.\n\nНажмите кнопку ниже — бот получит ваш номер и найдёт ваш аккаунт на сайте компании",
+        "agent_already":  "✅ Вы уже являетесь Агентом!\n\nВойдите в кабинет агента:\n🔗 {url}\n\nЛогин: ваш номер телефона",
+        "agent_success":  "🎉 Ура! Вы стали Агентом!\n\nЛогин: {phone}\nПароль: как на сайте компании\n\nВойдите в кабинет:\n🔗 {url}",
+        "agent_not_found": "❌ Номер {phone} не найден на сайте компании.\n\nЗарегистрируйтесь на сайте с этим номером, затем снова нажмите «Стать Агентом»",
+        "agent_failed":   "❌ Не удалось проверить/зарегистрировать. Попробуйте позже или через сайт компании.",
+        "btn_open_agent_cabinet": "🎯 Открыть кабинет агента",
+        "btn_register_site": "🌐 Зарегистрироваться",
     },
     "uz": {
         "hello":          "👋",
@@ -342,6 +365,19 @@ T = {
         "prices_title":   "💰 Narxlar",
         "prices_empty":   "⚠️ Narxlar hali sozlanmagan. Kompaniyaga murojaat qiling.",
         "prices_min_order_line": "📦 Minimal buyurtma: {min_order} {unit}",
+
+        # ── Agent bo'lish ──
+        "btn_agent":      "🤝 Agent bo'lish",
+        "agent_info_text": "🤝 <b>Agent bo'lish</b>\n\nAgentlar mijozlarni jalb qilish orqali har bir buyurtmadan komissiya oladi.\n\n📋 Shartlar:\n• Kompaniya saytida ro'yxatdan o'tgan bo'lish\n• Referral havola orqali mijoz topib kelish\n• Komissiya miqdori: buyurtma summasiga qarab\n\nDavom etish uchun tasdiqlang:",
+        "btn_agent_confirm": "✅ Tasdiqlash — Agent bo'lish",
+        "agent_checking": "⏳ Tekshirilmoqda…",
+        "agent_ask_contact": "🤝 Agent bo'lish\n\nSaytda akkaunt topilmadi.\n\nQuyidagi tugmani bosing — bot raqamingizni oladi va kompaniya saytidagi akkauntingizni topadi",
+        "agent_already":  "✅ Siz allaqachon Agentsiz!\n\nAgent kabinetiga kiring:\n🔗 {url}\n\nLogin: telefon raqamingiz",
+        "agent_success":  "🎉 Tabriklaymiz! Siz Agent bo'ldingiz!\n\nLogin: {phone}\nParol: saytdagi kabi\n\nKabinetga kiring:\n🔗 {url}",
+        "agent_not_found": "❌ {phone} raqami kompaniya saytida topilmadi.\n\nUshbu raqam bilan saytda ro'yxatdan o'ting, so'ng yana «Agent bo'lish» tugmasini bosing",
+        "agent_failed":   "❌ Tekshirib/ro'yxatdan o'tkazib bo'lmadi. Keyinroq yoki kompaniya sayti orqali urinib ko'ring.",
+        "btn_open_agent_cabinet": "🎯 Agent kabinetini ochish",
+        "btn_register_site": "🌐 Ro'yxatdan o'tish",
     },
 }
 
@@ -364,7 +400,7 @@ def menu_kb(lang: str, site_url: str) -> InlineKeyboardMarkup:
     """Главное меню — структура рядов как в прод-боте (menu_kb ~L719-729):
     ссылка на сайт → «Оставить заявку» (ведёт в подменю быстрая/полная,
     см. menu_order ниже) → статус+цены → калькулятор+профиль → оператор.
-    "Стать Агентом"/настройки языка из прод-бота сюда не перенесены (вне рамок задачи)."""
+    "Стать Агентом" — кнопка внутри «Мой профиль» (см. menu_profile), не здесь."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t(lang, "btn_webapp"), url=site_url)],
         [InlineKeyboardButton(text=t(lang, "btn_order"), callback_data="menu_order")],
@@ -583,6 +619,19 @@ async def _site_url(company_id: int) -> str:
         company = None
     slug = (company["slug"] if company else "") or ""
     return _company_site_url(slug) if slug else "https://cleano.uz/"
+
+
+async def _agent_cabinet_url(company_id: int) -> str:
+    """Ссылка на кабинет агента (staff.html) — тот же принцип, что и _site_url."""
+    try:
+        company = await db.get_company(company_id)
+    except Exception as e:
+        logging.warning(f"get_company error: {e}")
+        company = None
+    slug = (company["slug"] if company else "") or ""
+    if slug == "artez":
+        return "https://artez.uz/staff.html"
+    return f"https://cleano.uz/staff.html?company_slug={slug}" if slug else "https://cleano.uz/staff.html"
 
 
 def _join_names(lang: str, names: list[str]) -> str:
@@ -1532,9 +1581,9 @@ async def menu_prices(call: CallbackQuery, company_id: int, state: FSMContext) -
 
 # ══════════════════════════════════════
 #  МОЙ ПРОФИЛЬ — имя из Telegram (как в прод-боте, НЕ из БД), телефон/заказы —
-#  из БД. Формат сверен с прод-ботом (📛/📞/🆔/📊/✅). Без «Стать Агентом» —
-#  агентская программа сейчас завязана на функции без корректного company_id
-#  (get_user_by_tg_id/get_user_by_phone), делается отдельным этапом, не здесь.
+#  из БД. Формат сверен с прод-ботом (📛/📞/🆔/📊/✅). «Стать Агентом» — кнопка
+#  здесь же, см. menu_agent/agent_confirm ниже (company_id теперь корректно
+#  прокинут через get_user_by_tg_id/get_user_by_phone, см. security-фикс).
 #
 #  Заказы для статистики ищутся ТАК ЖЕ, как в «Статус заказа» (_gather_status_data,
 #  по телефону, не по client_tg_id) — бот никогда не создаёт заказ напрямую, и
@@ -1572,6 +1621,7 @@ async def menu_profile(call: CallbackQuery, company_id: int, state: FSMContext) 
         name=_h(name), phone=_h(phone), uid=uid, total=total, done=done, last=last_line,
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_agent"), callback_data="menu_agent")],
         [InlineKeyboardButton(text=t(lang, "btn_settings"), callback_data="menu_settings")],
         [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
     ])
@@ -1608,6 +1658,139 @@ async def menu_help(call: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     lang = data.get("lang", "ru")
     await call.message.answer(t(lang, "help_text"), reply_markup=back_kb(lang))
+
+
+# ══════════════════════════════════════
+#  СТАТЬ АГЕНТОМ — перенесено из прод-бота (menu_agent/agent_confirm/
+#  agent_contact_received, ~L1214-1304). Использует уже company-scoped
+#  _agent_status_for_bot/_agent_apply_for_bot из main.py (см. security-фикс
+#  2026-07-29: get_user_by_tg_id/get_user_by_phone/link_user_tg_id теперь
+#  ОБЯЗАТЕЛЬНО принимают company_id — раньше могли зацепить чужую компанию).
+#
+#  Если верифицированный tg_phone уже известен (клиент когда-то делился СВОИМ
+#  контактом — см. security-фикс phone spoofing) — используем его сразу, не
+#  спрашивая контакт повторно. Иначе просим поделиться контактом здесь же.
+# ══════════════════════════════════════
+async def _do_agent_check(uid: int, company_id: int, phone: str | None, lang: str, message: Message) -> None:
+    """phone=None — ещё не знаем номер (первое нажатие «Подтвердить», ничего не
+    просили) → при "не найдено" просто просим контакт. phone задан (уже
+    верифицирован — либо из tg_phone, либо только что получен через контакт) →
+    при "не найдено" показываем номер и предлагаем зарегистрироваться на сайте."""
+    from main import _agent_status_for_bot, _agent_apply_for_bot
+
+    try:
+        status = await _agent_status_for_bot(uid, phone, company_id)
+    except Exception as e:
+        logging.warning(f"_agent_status_for_bot error: {e}")
+        await message.answer(t(lang, "agent_failed"), reply_markup=back_kb(lang))
+        return
+
+    cabinet_url = await _agent_cabinet_url(company_id)
+
+    if status.get("is_agent"):
+        await message.answer(
+            t(lang, "agent_already").format(url=cabinet_url),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t(lang, "btn_open_agent_cabinet"), url=cabinet_url)],
+                [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
+            ]))
+        return
+
+    if status.get("has_site_account"):
+        try:
+            result = await _agent_apply_for_bot(uid, phone, company_id)
+        except Exception as e:
+            logging.warning(f"_agent_apply_for_bot error: {e}")
+            result = {"ok": False}
+        if result.get("ok"):
+            p = result.get("phone", "")
+            await message.answer(
+                t(lang, "agent_success").format(phone=_h(p), url=cabinet_url),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=t(lang, "btn_open_agent_cabinet"), url=cabinet_url)],
+                    [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
+                ]))
+        else:
+            await message.answer(t(lang, "agent_failed"), reply_markup=back_kb(lang))
+        return
+
+    if phone:
+        await message.answer(
+            t(lang, "agent_not_found").format(phone=_h(phone)),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t(lang, "btn_register_site"), url=await _site_url(company_id))],
+                [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
+            ]))
+    else:
+        await message.answer(
+            t(lang, "agent_ask_contact"),
+            reply_markup=ReplyKeyboardMarkup(keyboard=[
+                [KeyboardButton(text=t(lang, "btn_share_phone"), request_contact=True)],
+            ], resize_keyboard=True, one_time_keyboard=True))
+
+
+@router.callback_query(F.data == "menu_agent")
+async def menu_agent(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    await call.message.answer(t(lang, "agent_info_text"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_agent_confirm"), callback_data="agent_confirm")],
+        [InlineKeyboardButton(text=t(lang, "btn_cancel"), callback_data="go_menu")],
+    ]))
+
+
+@router.callback_query(F.data == "agent_confirm")
+async def agent_confirm(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    uid = call.from_user.id
+    await call.message.answer(t(lang, "agent_checking"))
+
+    try:
+        client = await db.get_bot_client_by_tg_id(uid, company_id)
+    except Exception as e:
+        logging.warning(f"get_bot_client_by_tg_id error: {e}")
+        client = None
+    tg_phone = (client or {}).get("tg_phone")
+
+    if not tg_phone:
+        await state.set_state(AgentForm.waiting_contact)
+    await _do_agent_check(uid, company_id, tg_phone, lang, call.message)
+
+
+@router.message(AgentForm.waiting_contact, F.contact)
+async def agent_contact_received(message: Message, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    await state.clear()
+    await state.update_data(lang=lang)
+    uid = message.from_user.id
+    await message.answer(t(lang, "agent_checking"), reply_markup=ReplyKeyboardRemove())
+
+    # Клиент мог переслать ЧУЖОЙ контакт — считаем верифицированным (и сохраняем
+    # как tg_phone) ТОЛЬКО если это его собственный номер (см. security-фикс
+    # phone spoofing, 2026-07-29 — тот же принцип и здесь: иначе можно было бы
+    # привязать чужой номер/сайт-аккаунт к своему tg_id и стать агентом за него).
+    is_own = message.contact.user_id == message.from_user.id
+    norm = normalize_phone_bot(message.contact.phone_number or "")
+    if not norm or not is_own:
+        await _do_agent_check(uid, company_id, norm or None, lang, message)
+        return
+
+    try:
+        await db.upsert_bot_client(
+            tg_id=uid, company_id=company_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            phone=norm, lang=lang, tg_phone=norm,
+        )
+    except Exception as e:
+        logging.warning(f"upsert_bot_client (agent contact) error: {e}")
+
+    await _do_agent_check(uid, company_id, norm, lang, message)
 
 
 # ══════════════════════════════════════

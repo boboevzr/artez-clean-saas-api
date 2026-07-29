@@ -3045,7 +3045,9 @@ async def tg_phone_link(body: dict):
         raise HTTPException(400, "phone and tg_id required")
     phone = normalize_phone(phone)
     await db.save_tg_phone_link(phone, int(tg_id))
-    user = await db.get_user_by_phone(phone)
+    # Легаси-эндпоинт, вызывается только старым прод-ботом ARTEZ (company_id=1
+    # захардкожен там же) — не трогаем поведение, SaaS-бот его не использует.
+    user = await db.get_user_by_phone(phone, 1)
     return {"ok": True, "registered": user is not None and user.get("is_verified", False)}
 
 
@@ -3359,7 +3361,7 @@ async def link_tg(req: LinkTgRequest):
     user = await db.get_user_by_id(req.user_id)
     if not user:
         raise HTTPException(404, "Пользователь не найден")
-    await db.link_user_tg_id(user["phone"], req.tg_id)
+    await db.link_user_tg_id(user["phone"], req.tg_id, user["company_id"])
     return {"ok": True, "phone": user["phone"], "name": user.get("first_name") or ""}
 
 @app.get("/api/orders")
@@ -3753,7 +3755,7 @@ async def agent_apply(req: AgentApplyRequest, user=Depends(get_current_user)):
     # Привязываем tg_id к аккаунту сайта (если ещё не привязан)
     tg_id = client.get("tg_id")
     if tg_id and not user.get("tg_id"):
-        await db.link_user_tg_id(user["phone"], int(tg_id))
+        await db.link_user_tg_id(user["phone"], int(tg_id), user.get("company_id") or 1)
 
     site_user = await db.get_user_by_id(user["id"])
     password_hash = site_user["password_hash"] if site_user else None
@@ -3774,11 +3776,20 @@ async def agent_apply(req: AgentApplyRequest, user=Depends(get_current_user)):
 class ApplyByTgRequest(BaseModel):
     tg_id: int
     phone: str | None = None  # телефон из базы бота как запасной вариант
+    company_slug: str | None = None  # SaaS-бот передаёт свою компанию явно
 
-async def _find_site_user_for_bot(tg_id: int, phone: str | None):
-    """Ищет пользователя сайта: сначала по tg_id, потом по телефону из бота."""
+async def _find_site_user_for_bot(tg_id: int, phone: str | None, company_id: int = 1):
+    """Ищет пользователя сайта: сначала по tg_id, потом по телефону из бота.
+
+    company_id обязательно скопирован в КАЖДЫЙ lookup ниже — иначе поиск мог
+    зацепить аккаунт ДРУГОЙ компании с тем же tg_id/телефоном (см. фикс
+    get_user_by_tg_id/get_user_by_phone/link_user_tg_id, 2026-07-29). Дефолт
+    =1 сохранён для обратной совместимости со старым прод-ботом ARTEZ
+    (`ARTEZ-BOT`), который вызывает /api/agent/* без company_id вообще —
+    трогать тот бот нельзя, поведение для него не меняется.
+    """
     try:
-        user = await db.get_user_by_tg_id(tg_id)
+        user = await db.get_user_by_tg_id(tg_id, company_id)
         if user:
             return user
     except Exception:
@@ -3786,32 +3797,43 @@ async def _find_site_user_for_bot(tg_id: int, phone: str | None):
     if phone:
         try:
             norm = normalize_phone(phone)
-            user = await db.get_user_by_phone(norm)
+            user = await db.get_user_by_phone(norm, company_id)
             if not user and norm.startswith("+"):
-                user = await db.get_user_by_phone(norm[1:])
+                user = await db.get_user_by_phone(norm[1:], company_id)
         except Exception:
             user = None
         if user:
             try:
-                await db.link_user_tg_id(user["phone"], tg_id)
+                await db.link_user_tg_id(user["phone"], tg_id, company_id)
             except Exception:
                 pass
             return user
     return None
 
-@app.get("/api/agent/status-by-tg/{tg_id}")
-async def agent_status_by_tg_endpoint(tg_id: int, phone: str | None = None):
-    """Для бота: проверить статус агента по tg_id без авторизации."""
-    staff = await db.get_staff_by_tg_id(tg_id)
+async def _agent_status_for_bot(tg_id: int, phone: str | None, company_id: int) -> dict:
+    """Общая логика для /api/agent/status-by-tg — вынесена отдельно, чтобы
+    order_bot_handlers.py (SaaS-бот, тот же процесс) могла вызывать её напрямую
+    с уже известным company_id, без HTTP-петли на саму себя и без дублирования
+    company-scoping логики."""
+    staff = await db.get_staff_by_tg_id_and_company(tg_id, company_id)
     if staff and staff["role"] == "agent":
         return {"ok": True, "is_agent": True, "has_site_account": True}
-    site_user = await _find_site_user_for_bot(tg_id, phone)
+    site_user = await _find_site_user_for_bot(tg_id, phone, company_id)
     return {"ok": True, "is_agent": False, "has_site_account": bool(site_user)}
 
-@app.post("/api/agent/apply-by-tg")
-async def agent_apply_by_tg(req: ApplyByTgRequest):
-    """Бот регистрирует агента по tg_id — ищет аккаунт сайта по tg_id или телефону."""
-    site_user = await _find_site_user_for_bot(req.tg_id, req.phone)
+@app.get("/api/agent/status-by-tg/{tg_id}")
+async def agent_status_by_tg_endpoint(tg_id: int, phone: str | None = None, company_slug: str | None = None):
+    """Для бота: проверить статус агента по tg_id без авторизации.
+
+    company_slug опционален — старый прод-бот ARTEZ его не передаёт (дефолт
+    company_id=1, как и раньше); SaaS-бот заказов передаёт свой slug явно.
+    """
+    cid = await _resolve_client_company_id(company_slug) if company_slug else 1
+    return await _agent_status_for_bot(tg_id, phone, cid)
+
+async def _agent_apply_for_bot(tg_id: int, phone: str | None, company_id: int) -> dict:
+    """Общая логика для /api/agent/apply-by-tg — см. _agent_status_for_bot."""
+    site_user = await _find_site_user_for_bot(tg_id, phone, company_id)
     if not site_user:
         return {"ok": False, "reason": "no_site_account"}
     if not site_user.get("is_verified"):
@@ -3826,6 +3848,12 @@ async def agent_apply_by_tg(req: ApplyByTgRequest):
     if not staff_id:
         return {"ok": True, "already": True, "phone": site_user["phone"]}
     return {"ok": True, "already": False, "phone": site_user["phone"], "name": site_user.get("first_name") or ""}
+
+@app.post("/api/agent/apply-by-tg")
+async def agent_apply_by_tg(req: ApplyByTgRequest):
+    """Бот регистрирует агента по tg_id — ищет аккаунт сайта по tg_id или телефону."""
+    cid = await _resolve_client_company_id(req.company_slug) if req.company_slug else 1
+    return await _agent_apply_for_bot(req.tg_id, req.phone, cid)
 
 @app.post("/api/agent/reset-password")
 async def agent_reset_password(body: dict):
@@ -4252,7 +4280,7 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
     # лид пришёл с сайта/бота и привязан к зарегистрированному пользователю.
     if lead.get("source") in ("site", "bot") and lead.get("client_phone"):
         try:
-            promo_user = await db.get_user_by_phone(lead["client_phone"])
+            promo_user = await db.get_user_by_phone(lead["client_phone"], lead["company_id"])
             if promo_user:
                 await db.apply_promo_to_order(order_num, promo_user["id"])
         except Exception as e:

@@ -2086,12 +2086,12 @@ async def ensure_saas_schema():
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
 # ══════════════════════════════════════
-async def get_user_by_phone(phone: str, company_id: int = 1):
-    # company_id по умолчанию =1: вызывается и из bot-flow (tg-phone-link,
-    # register-via-tg), который пока не несёт company_id (см. память
-    # project_saas_security_idor, пробел #2 — таблица clients тоже без
-    # company_id). Веб-эндпоинты (register/login/verify/resend) передают
-    # реальный company_id явно, резолвя company_slug из фронтенда.
+async def get_user_by_phone(phone: str, company_id: int):
+    # company_id ОБЯЗАТЕЛЕН (без дефолта) — раньше дефолт =1 приводил к тому,
+    # что при вызове без явного company_id код молча искал/находил пользователя
+    # ЧУЖОЙ компании (IDOR, см. security-фикс 2026-07-29). Все вызовы теперь
+    # обязаны резолвить свою компанию явно (через _resolve_client_company_id,
+    # contextvar-cid или company_id лида/заказа), см. вызовы в main.py.
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE phone=$1 AND company_id=$2", phone, company_id)
@@ -2102,15 +2102,21 @@ async def get_user_by_id(user_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE id=$1", user_id)
 
-async def get_user_by_tg_id(tg_id):
+async def get_user_by_tg_id(tg_id, company_id: int):
+    # company_id ОБЯЗАТЕЛЕН — без фильтрации по компании этот запрос мог найти
+    # аккаунт ДРУГОЙ компании с тем же tg_id (users.tg_id ничем не ограничен
+    # по компании) и по ошибке привязать/создать агента не в той компании
+    # (см. security-фикс 2026-07-29, тот же класс что и phone spoofing в боте).
     if not pool: return None
     async with pool.acquire() as conn:
         # Пробуем как целое число, затем как строку
         try:
-            return await conn.fetchrow("SELECT * FROM users WHERE tg_id=$1", int(tg_id))
+            return await conn.fetchrow(
+                "SELECT * FROM users WHERE tg_id=$1 AND company_id=$2", int(tg_id), company_id)
         except Exception:
             try:
-                return await conn.fetchrow("SELECT * FROM users WHERE tg_id::text=$1", str(tg_id))
+                return await conn.fetchrow(
+                    "SELECT * FROM users WHERE tg_id::text=$1 AND company_id=$2", str(tg_id), company_id)
             except Exception:
                 return None
 
@@ -2138,13 +2144,17 @@ async def verify_user(phone: str, company_id: int = 1):
         """, phone, company_id)
 
 
-async def link_user_tg_id(phone: str, tg_id: int):
+async def link_user_tg_id(phone: str, tg_id: int, company_id: int):
+    # company_id ОБЯЗАТЕЛЕН — без него UPDATE зацепил бы ВСЕ строки с этим
+    # телефоном во ВСЕХ компаниях сразу (users.phone уникален только в паре
+    # с company_id, один и тот же номер может быть зарегистрирован отдельно
+    # в разных компаниях) и молча привязал бы чужой tg_id не в той компании.
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
             UPDATE users SET tg_id = $2, updated_at = NOW()
-            WHERE phone = $1
-        """, phone, tg_id)
+            WHERE phone = $1 AND company_id = $3
+        """, phone, tg_id, company_id)
 
 async def save_tg_phone_link(phone: str, tg_id: int):
     """Сохраняет связку телефон→tg_id от бота (до регистрации на сайте)."""
@@ -3065,7 +3075,7 @@ async def create_agent_from_user(user: dict, password_hash: str, branch: str = "
             ON CONFLICT (company_id, login) DO NOTHING
             RETURNING id
         """, user["first_name"], user["phone"], user["phone"],
-            password_hash, user.get("tg_id"), user["id"], branch or None,
+            password_hash, (str(user["tg_id"]) if user.get("tg_id") else None), user["id"], branch or None,
             user.get("company_id") or 1)
         if staff_id and lead_pct > 0:
             await conn.execute(
