@@ -790,6 +790,7 @@ class OrderRequest(BaseModel):
     total_price: int | None = None
     source: str = "site"  # "site" or "bot"
     client_tg_id: int | None = None
+    company_slug: str | None = None
 
     @field_validator("phone")
     @classmethod
@@ -7873,7 +7874,13 @@ async def tg_client_delete(tg_id: int, body: dict, _=Depends(get_admin)):
 
 @app.post("/api/callback")
 async def site_callback_request(body: dict = Body(...)):
-    """Обратный звонок с сайта — создаёт лид и запускает автодозвон."""
+    """Обратный звонок с сайта — создаёт лид и запускает автодозвон.
+
+    Та же уязвимость, что и в /api/orders (см. коммент там): анонимные запросы
+    без company_slug молча уходили в company_id=1 (дефолт middleware)."""
+    company_slug = (body.get("company_slug") or "").strip()
+    if company_slug:
+        db.set_request_company(await _resolve_client_company_id(company_slug))
     phone        = (body.get("phone") or "").strip()
     profile_phone = (body.get("profile_phone") or "").strip()
     name         = (body.get("name") or "").strip()
@@ -7936,7 +7943,16 @@ async def site_callback_request(body: dict = Body(...)):
 
 @app.post("/api/orders")
 async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_user)):
-    """Заявка с сайта/бота → сохраняется как лид для обработки сотрудниками."""
+    """Заявка с сайта/бота → сохраняется как лид для обработки сотрудниками.
+
+    company_id: для анонимных посетителей (нет JWT) глобальный company_id_middleware
+    дефолтит на 1 (ARTEZ) — без явного company_slug заявки ЛЮБОЙ другой компании
+    молча уходили бы в company_id=1 (реальный баг, найден 2026-07-29). Если slug
+    передан — переопределяем явно; если нет (старый закэшированный фронтенд или
+    уже аутентифицированный пользователь) — доверяем тому, что уже поставил
+    middleware, ничего не ломаем для авторизованных запросов."""
+    if order.company_slug:
+        db.set_request_company(await _resolve_client_company_id(order.company_slug))
     full_name = f"{order.first_name} {order.last_name}".strip()
     note_parts = []
     if order.service_type: note_parts.append(f"Тип: {order.service_type}")
