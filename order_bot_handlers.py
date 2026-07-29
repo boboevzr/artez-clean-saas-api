@@ -53,6 +53,16 @@ class QuickForm(StatesGroup):
     name    = State()
 
 
+class CalcForm(StatesGroup):
+    """Калькулятор стоимости — анонимный, ничего не сохраняет (не создаёт лид).
+    Порядок шагов перенесён из старого bot.py (class CalcForm, ~L2282-2361):
+    услуга → тип услуги → ширина (см) → длина (см) → результат."""
+    service      = State()
+    service_type = State()
+    width        = State()
+    length       = State()
+
+
 class OrderForm(StatesGroup):
     """Полный заказ — реальный порядок шагов из старого bot.py (class OrderForm):
     имя → телефон → филиал → адрес → услуга → тип услуги → дата → время → лид.
@@ -113,6 +123,17 @@ T = {
         "ask_time_to":    "🕐 Выберите время окончания:",
         "full_order_done": "✅ Заявка №{num} принята!\n\nМы свяжемся с вами в ближайшее время.",
         "full_order_failed": "⚠️ Не удалось сохранить заявку. Попробуйте ещё раз чуть позже.",
+
+        # ── Калькулятор стоимости (CalcForm) ──
+        "btn_calc":       "🧮 Калькулятор",
+        "calc_ask_svc":   "🧮 Калькулятор стоимости\n\nВыберите услугу:",
+        "calc_selected_header": "🧮 Калькулятор стоимости\n\nУслуга: {svc}",
+        "calc_ask_w":     "Введите ширину в сантиметрах:\n\nПример: 200 (= 2 метра)",
+        "calc_ask_l":     "Теперь введите длину в сантиметрах:\n\nПример: 300 (= 3 метра)",
+        "calc_result_below_min": "🧮 Расчёт стоимости\n\n📐 Размер: {w} × {l} см = {sqm} {unit}\n{svc}\n💰 {price} сум/{unit}\n\n⚠️ Ваш размер {sqm} {unit} — меньше мин. заказа ({min_order} {unit})\n💵 Итого: {total} сум (за {min_order} {unit})",
+        "calc_result_no_min": "🧮 Расчёт стоимости\n\n📐 Размер: {w} × {l} см = {sqm} {unit}\n{svc}\n💰 {price} сум/{unit}\n\n💵 Итого: {total} сум",
+        "calc_price_missing": "⚠️ Цена для этой услуги ещё не настроена. Обратитесь в компанию.",
+        "invalid_num":    "⚠️ Пожалуйста, введите число. Например: 200",
     },
     "uz": {
         "hello":          "👋",
@@ -153,6 +174,17 @@ T = {
         "ask_time_to":    "🕐 Tugash vaqtini tanlang:",
         "full_order_done": "✅ Ariza №{num} qabul qilindi!\n\nTez orada siz bilan bog'lanamiz.",
         "full_order_failed": "⚠️ Arizani saqlab bo'lmadi. Birozdan keyin qayta urinib ko'ring.",
+
+        # ── Narx kalkulyatori (CalcForm) ──
+        "btn_calc":       "🧮 Kalkulyator",
+        "calc_ask_svc":   "🧮 Narx kalkulyatori\n\nXizmatni tanlang:",
+        "calc_selected_header": "🧮 Narx kalkulyatori\n\nXizmat: {svc}",
+        "calc_ask_w":     "Enini santimetrda kiriting:\n\nMisol: 200 (= 2 metr)",
+        "calc_ask_l":     "Endi bo'yini santimetrda kiriting:\n\nMisol: 300 (= 3 metr)",
+        "calc_result_below_min": "🧮 Narx hisobi\n\n📐 O'lcham: {w} × {l} sm = {sqm} {unit}\n{svc}\n💰 {price} so'm/{unit}\n\n⚠️ Sizning o'lchamingiz {sqm} {unit} — minimal buyurtmadan kam ({min_order} {unit})\n💵 Jami: {total} so'm ({min_order} {unit} uchun)",
+        "calc_result_no_min": "🧮 Narx hisobi\n\n📐 O'lcham: {w} × {l} sm = {sqm} {unit}\n{svc}\n💰 {price} so'm/{unit}\n\n💵 Jami: {total} so'm",
+        "calc_price_missing": "⚠️ Bu xizmat uchun narx hali sozlanmagan. Kompaniyaga murojaat qiling.",
+        "invalid_num":    "⚠️ Iltimos, son kiriting. Masalan: 200",
     },
 }
 
@@ -175,6 +207,7 @@ def menu_kb(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t(lang, "btn_order"), callback_data="menu_order")],
         [InlineKeyboardButton(text=t(lang, "btn_order_full"), callback_data="menu_order_full")],
+        [InlineKeyboardButton(text=t(lang, "btn_calc"), callback_data="menu_calc")],
     ])
 
 
@@ -747,6 +780,168 @@ async def full_time_to(call: CallbackQuery, company_id: int, state: FSMContext) 
     to_h = int(call.data.split("_")[-1])
     time_txt = f"{from_h:02d}:00 — {to_h:02d}:00"
     await _finish_full_order(call.message, company_id, state, time_txt, call.from_user)
+
+
+# ══════════════════════════════════════
+#  КАЛЬКУЛЯТОР СТОИМОСТИ (CalcForm) — услуга → тип услуги → ширина → длина →
+#  результат. Анонимный, ничего не сохраняет, никакого лида не создаёт —
+#  чисто информационный расчёт (площадь × цена). Перенесено из старого
+#  bot.py (class CalcForm, ~L2282-2361), без module-level кэша цен: бот общий
+#  на все компании в одном процессе, поэтому цены/юниты берутся заново на
+#  шаге показа результата через db.get_all_prices()/db.get_all_units()
+#  (contextvar company_id уже резолвится корректно к моменту вызова).
+# ══════════════════════════════════════
+
+# Фолбек символов единиц измерения — только для отображения, если в таблице
+# units почему-то нет нужной записи (в норме она сидируется при init_db).
+_UNIT_SYMBOL_FALLBACK = {
+    "m2":  {"symbol_ru": "м²", "symbol_uz": "m²"},
+    "m":   {"symbol_ru": "м",  "symbol_uz": "m"},
+    "pcs": {"symbol_ru": "шт", "symbol_uz": "dona"},
+    "cm":  {"symbol_ru": "см", "symbol_uz": "sm"},
+    "cm2": {"symbol_ru": "см²", "symbol_uz": "sm²"},
+    "kg":  {"symbol_ru": "кг", "symbol_uz": "kg"},
+}
+
+
+def _svc_display_name(lang: str, services: list[dict], svc_key: str) -> str:
+    """Название услуги (эмодзи + имя на нужном языке) по её ключу, из уже
+    полученного списка услуг компании. Фоллбек — сам ключ, если услугу
+    почему-то не нашли (например, каталог поменялся между шагами)."""
+    for s in services:
+        if s.get("key") == svc_key:
+            name = s.get(f"name_{lang}") or s.get("name_ru") or svc_key
+            emoji = s.get("emoji") or ""
+            return f"{emoji} {name}".strip()
+    return svc_key
+
+
+async def _unit_symbol(unit_key: str, lang: str) -> str:
+    try:
+        units = await db.get_all_units()
+    except Exception as e:
+        logging.warning(f"get_all_units error: {e}")
+        units = []
+    for u in units:
+        if u["key"] == unit_key:
+            return u["symbol_uz"] if lang == "uz" else u["symbol_ru"]
+    fallback = _UNIT_SYMBOL_FALLBACK.get(unit_key) or _UNIT_SYMBOL_FALLBACK["m2"]
+    return fallback["symbol_uz"] if lang == "uz" else fallback["symbol_ru"]
+
+
+@router.callback_query(F.data == "menu_calc")
+async def menu_calc(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    try:
+        services = await db.get_services_for_company(company_id)
+    except Exception as e:
+        logging.warning(f"get_services_for_company error: {e}")
+        services = []
+    await state.set_state(CalcForm.service)
+    await call.message.answer(t(lang, "calc_ask_svc"), reply_markup=service_kb(lang, services))
+
+
+@router.callback_query(CalcForm.service, F.data.startswith("svc_"))
+async def calc_service(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    svc_key = call.data.replace("svc_", "")
+    try:
+        services = await db.get_services_for_company(company_id)
+    except Exception as e:
+        logging.warning(f"get_services_for_company error: {e}")
+        services = []
+    svc_name = _svc_display_name(lang, services, svc_key)
+    await state.update_data(calc_svc=svc_key, calc_svc_name=svc_name)
+    await state.set_state(CalcForm.service_type)
+    await call.message.answer(t(lang, "ask_service_type"), reply_markup=service_type_kb(lang))
+
+
+@router.callback_query(CalcForm.service_type, F.data.startswith("of_svctype_"))
+async def calc_service_type(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    svctype = call.data.replace("of_svctype_", "")
+    type_label = t(lang, "btn_type_standard") if svctype == "standard" else t(lang, "btn_type_express")
+    await state.update_data(calc_svctype=svctype, calc_svctype_label=type_label)
+    await state.set_state(CalcForm.width)
+    svc_display = f"{data.get('calc_svc_name', '')} ({type_label})".strip()
+    header = t(lang, "calc_selected_header").format(svc=svc_display)
+    await call.message.answer(header + "\n\n" + t(lang, "calc_ask_w"), reply_markup=cancel_kb(lang))
+
+
+@router.message(CalcForm.width)
+async def calc_width(message: Message, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    raw = (message.text or "").strip()
+    try:
+        width = float(raw.replace(",", "."))
+    except ValueError:
+        await message.answer(t(lang, "invalid_num"))
+        return
+    await state.update_data(calc_w=width)
+    await state.set_state(CalcForm.length)
+    svc_display = f"{data.get('calc_svc_name', '')} ({data.get('calc_svctype_label', '')})".strip()
+    header = t(lang, "calc_selected_header").format(svc=svc_display)
+    await message.answer(header + "\n\n" + t(lang, "calc_ask_l"), reply_markup=cancel_kb(lang))
+
+
+@router.message(CalcForm.length)
+async def calc_length(message: Message, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    raw = (message.text or "").strip()
+    try:
+        length = float(raw.replace(",", "."))
+    except ValueError:
+        await message.answer(t(lang, "invalid_num"))
+        return
+
+    svc = data.get("calc_svc", "")
+    svctype = data.get("calc_svctype", "standard")
+    width = data.get("calc_w", 0.0)
+
+    try:
+        prices = await db.get_all_prices()
+    except Exception as e:
+        logging.warning(f"get_all_prices error: {e}")
+        prices = {}
+    entry = prices.get(svc, {}).get(svctype)
+
+    if not entry:
+        await state.clear()
+        await state.update_data(lang=lang)
+        await message.answer(t(lang, "calc_price_missing"), reply_markup=back_kb(lang))
+        return
+
+    sqm_real = (width / 100) * (length / 100)
+    min_order = entry.get("min_order")
+    sqm_bill = max(sqm_real, min_order) if min_order else sqm_real
+    price = entry["price"]
+    total = int(sqm_bill * price)
+    unit_sym = await _unit_symbol(entry.get("unit_key") or "m2", lang)
+    svc_display = f"{data.get('calc_svc_name', '')} ({data.get('calc_svctype_label', '')})".strip()
+
+    fmt_args = dict(
+        w=int(width), l=int(length), sqm=round(sqm_real, 2), unit=unit_sym,
+        svc=svc_display,
+        price=f"{price:,}".replace(",", " "),
+        total=f"{total:,}".replace(",", " "),
+        min_order=min_order,
+    )
+    if min_order and sqm_real < min_order:
+        result = t(lang, "calc_result_below_min").format(**fmt_args)
+    else:
+        result = t(lang, "calc_result_no_min").format(**fmt_args)
+
+    await state.clear()
+    await state.update_data(lang=lang)
+    await message.answer(result, reply_markup=back_kb(lang))
 
 
 # ══════════════════════════════════════
