@@ -7188,6 +7188,17 @@ async def get_services_for_company(company_id: int) -> list[dict]:
             "SELECT * FROM services WHERE company_id=$1 ORDER BY order_idx, key", company_id)
         return [dict(r) for r in rows]
 
+async def get_client_orders_by_tg(tg_id: int, company_id: int) -> list[dict]:
+    """Заказы клиента бота заказов (order_bot_handlers.py) по client_tg_id — для
+    разделов «Статус заказа» и «Мой профиль». Явный company_id (вебхук общий на
+    все компании), от новых к старым."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM orders WHERE client_tg_id=$1 AND company_id=$2 ORDER BY created_at DESC",
+            tg_id, company_id)
+        return [dict(r) for r in rows]
+
 async def get_staff_by_role(company_id: int, role: str) -> list:
     """Активные сотрудники компании с указанной ролью (для группового роутинга)."""
     if not pool: return []

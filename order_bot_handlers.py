@@ -15,9 +15,23 @@
 push + сообщение в TG-группу филиала с кнопкой «Взять лид» (см. cb_take_lead —
 использует db.take_lead(), уже company_id-aware).
 
-НЕ перенесено (следующий этап): калькулятор площади/суммы, скидки, долги,
-водительские колбэки, admin-команды, autodial, live-chat.
-См. artez_bot/artez_bot/bot.py (только чтение, не редактировать).
+Главное меню (menu_kb/_build_menu_text) построено динамически по образцу прод-бота:
+название компании+тэглайн, филиалы, короткий/основной номер, телефоны по филиалам,
+кнопки «Открыть приложение»/«Оставить заявку» (подменю быстрая/полная)/«Статус
+заказа»/«Цены»/«Калькулятор»/«Мой профиль»/«Оператор» (эскалация на сотрудника
+через группу лидов, с возможностью ответить клиенту).
+
+НЕ перенесено (следующий этап, ОТЛОЖЕНО по просьбе пользователя): скидки, долги,
+касса, водительские маршруты — в SaaS для этого уже есть веб/PWA (staff.html), но
+пользователь хочет продублировать и в боте, просто не сейчас. См. память проекта
+(project_artez_bot_saas_migration) за деталями/находками для этого этапа.
+Также не перенесены: admin-команды, autodial, live-chat, агентская программа —
+вне рамок текущей миграции. См. artez_bot/artez_bot/bot.py (только чтение).
+
+ВАЖНО: echo_fallback ограничен приватными чатами (F.chat.type == "private") — бот
+теперь состоит в группе лидов компании (уведомления/«Взять лид»/«Оператор»), и без
+этого ограничения обычная переписка сотрудников в группе получала бы в ответ
+клиентское меню.
 
 Лид создаётся через db.create_lead() — ту же функцию, что использует остальной API
 (admin.html, /api/bot/lead и т.д.), с явным company_id (вебхук общий на все компании,
@@ -26,6 +40,8 @@ request-scoped contextvar _cid() здесь не работает).
 from __future__ import annotations
 
 import asyncio
+import html
+import json
 import logging
 import re
 
@@ -80,6 +96,65 @@ class OrderForm(StatesGroup):
     time_to      = State()   # выбор конца (grid)
 
 
+class OperatorForm(StatesGroup):
+    """Клиент пишет сообщение оператору — уходит в TG-группу лидов компании
+    с кнопкой «Ответить клиенту» (см. admin_reply_start/AdminReplyForm ниже)."""
+    message = State()
+
+
+class AdminReplyForm(StatesGroup):
+    """Сотрудник нажал «Ответить клиенту» в группе — следующее его сообщение
+    (в ТОЙ ЖЕ группе, от того же tg_id — FSM-ключ включает chat_id+user_id,
+    см. order_bot_storage.PostgresStorage) пересылается клиенту."""
+    waiting_reply = State()
+
+
+# Группировка статусов заказа для раздела «Статус заказа» — перенесено из
+# старого bot.py (STATUS_GROUPS/ORDER_STATUS_NAMES_*, ~L550-582), значения
+# статусов сверены с ALL_ORDER_STATUSES в main.py (реальный список, не выдумано).
+# "drying" добавлен в "progress" — в прод-боте отсутствовал в словаре группировки,
+# но статус существует в ALL_ORDER_STATUSES между washing и packing, логично
+# туда же (см. финальный ответ агента про это архитектурное решение).
+STATUS_GROUPS = {
+    "new":       ["new", "confirmed"],
+    "progress":  ["pickup", "received", "washing", "drying", "packing", "ready", "delivery"],
+    "done":      ["delivered"],
+    "cancelled": ["cancelled"],
+}
+
+ORDER_STATUS_NAMES_RU = {
+    "new":       "🆕 Новый",
+    "confirmed": "✅ Подтверждён",
+    "pickup":    "🚗 Вывоз",
+    "received":  "📥 В мастерской",
+    "washing":   "🧼 Мойка",
+    "drying":    "💨 Сушка",
+    "packing":   "📦 Упаковка",
+    "ready":     "✅ Готов",
+    "delivery":  "🚚 Доставка",
+    "delivered": "✅ Доставлен",
+    "cancelled": "❌ Отменён",
+}
+ORDER_STATUS_NAMES_UZ = {
+    "new":       "🆕 Yangi",
+    "confirmed": "✅ Tasdiqlangan",
+    "pickup":    "🚗 Olib ketish",
+    "received":  "📥 Ustaxonada",
+    "washing":   "🧼 Yuvish",
+    "drying":    "💨 Quritish",
+    "packing":   "📦 Qadoqlash",
+    "ready":     "✅ Tayyor",
+    "delivery":  "🚚 Yetkazish",
+    "delivered": "✅ Yetkazildi",
+    "cancelled": "❌ Bekor qilindi",
+}
+
+
+def _order_status_name(lang: str, status: str) -> str:
+    names = ORDER_STATUS_NAMES_UZ if lang == "uz" else ORDER_STATUS_NAMES_RU
+    return names.get(status, status)
+
+
 # ══════════════════════════════════════
 #  ТЕКСТЫ (только ключи, нужные быстрому заказу — не весь словарь прод-бота)
 # ══════════════════════════════════════
@@ -88,7 +163,16 @@ T = {
         "hello":          "👋",
         "lang_set":       "🇷🇺 Выбран русский язык",
         "menu_title":     "🏠 Главное меню",
-        "btn_order":      "📋 Оформить заказ",
+        "btn_order":      "📄 Оставить заявку",
+        "ask_order_type": "📋 Выберите тип заявки:",
+        "btn_order_quick": "⚡ Быстрая заявка",
+        "btn_webapp":     "🌐 Открыть приложение",
+        "btn_status":     "📦 Статус заказа",
+        "btn_prices":     "💰 Цены",
+        "btn_profile":    "👤 Мой профиль",
+        "btn_operator":   "🎧 Оператор",
+        "contact_short_line": "☎️ Короткий номер: {num}",
+        "contact_main_label": "📞 Оператор:",
         "ask_service":    "🧺 Выберите услугу:",
         "ask_phone":      "📞 Поделитесь номером или введите вручную:\n\nФормат: +998XXXXXXXXX",
         "btn_share_phone": "📱 Поделиться номером",
@@ -134,12 +218,46 @@ T = {
         "calc_result_no_min": "🧮 Расчёт стоимости\n\n📐 Размер: {w} × {l} см = {sqm} {unit}\n{svc}\n💰 {price} сум/{unit}\n\n💵 Итого: {total} сум",
         "calc_price_missing": "⚠️ Цена для этой услуги ещё не настроена. Обратитесь в компанию.",
         "invalid_num":    "⚠️ Пожалуйста, введите число. Например: 200",
+
+        # ── Статус заказа ──
+        "status_empty":      "📦 Статус заказа\n\nУ вас пока нет заявок.",
+        "status_menu_title": "📦 Статус заказа\n\nВыберите категорию:",
+        "status_btn_new":       "🆕 Новые",
+        "status_btn_progress":  "🔄 В работе",
+        "status_btn_done":      "✅ Выполнено",
+        "status_btn_cancelled": "❌ Отменены",
+        "status_group_empty": "В этой категории заявок нет.",
+        "status_order_line":  "📋 №{num}\n🧺 {service}\n📅 {date}\n📌 Статус: {status}",
+        "btn_back_to_status": "◀️ К категориям",
+
+        # ── Мой профиль ──
+        "profile_text":   "👤 Мой профиль\n\nИмя: {name}\nТелефон: {phone}\n\nЗаказов всего: {total}{last}",
+        "profile_last":   "\nПоследний заказ: {date}",
+        "profile_nophone": "не указан",
+
+        # ── Оператор ──
+        "operator_text":  "🎧 Напишите ваше сообщение для оператора:",
+        "operator_fwd":   "✅ Сообщение передано оператору.",
+
+        # ── Цены ──
+        "prices_title":   "💰 Цены",
+        "prices_empty":   "⚠️ Цены ещё не настроены. Обратитесь в компанию.",
+        "prices_min_order_line": "📦 Мин. заказ: {min_order} {unit}",
     },
     "uz": {
         "hello":          "👋",
         "lang_set":       "🇺🇿 O'zbek tili tanlandi",
         "menu_title":     "🏠 Asosiy menyu",
-        "btn_order":      "📋 Buyurtma berish",
+        "btn_order":      "📄 Ariza qoldirish",
+        "ask_order_type": "📋 Ariza turini tanlang:",
+        "btn_order_quick": "⚡ Tezkor ariza",
+        "btn_webapp":     "🌐 Ilovani ochish",
+        "btn_status":     "📦 Buyurtma holati",
+        "btn_prices":     "💰 Narxlar",
+        "btn_profile":    "👤 Mening profilim",
+        "btn_operator":   "🎧 Operator",
+        "contact_short_line": "☎️ Qisqa raqam: {num}",
+        "contact_main_label": "📞 Operator:",
         "ask_service":    "🧺 Xizmatni tanlang:",
         "ask_phone":      "📞 Raqamingizni ulashing yoki qo'lda kiriting:\n\nFormat: +998XXXXXXXXX",
         "btn_share_phone": "📱 Raqamni ulashish",
@@ -185,6 +303,31 @@ T = {
         "calc_result_no_min": "🧮 Narx hisobi\n\n📐 O'lcham: {w} × {l} sm = {sqm} {unit}\n{svc}\n💰 {price} so'm/{unit}\n\n💵 Jami: {total} so'm",
         "calc_price_missing": "⚠️ Bu xizmat uchun narx hali sozlanmagan. Kompaniyaga murojaat qiling.",
         "invalid_num":    "⚠️ Iltimos, son kiriting. Masalan: 200",
+
+        # ── Buyurtma holati ──
+        "status_empty":      "📦 Buyurtma holati\n\nSizda hali buyurtmalar yo'q.",
+        "status_menu_title": "📦 Buyurtma holati\n\nKategoriyani tanlang:",
+        "status_btn_new":       "🆕 Yangi",
+        "status_btn_progress":  "🔄 Bajarilmoqda",
+        "status_btn_done":      "✅ Bajarildi",
+        "status_btn_cancelled": "❌ Bekor qilindi",
+        "status_group_empty": "Bu kategoriyada buyurtmalar yo'q.",
+        "status_order_line":  "📋 №{num}\n🧺 {service}\n📅 {date}\n📌 Holat: {status}",
+        "btn_back_to_status": "◀️ Kategoriyalarga",
+
+        # ── Mening profilim ──
+        "profile_text":   "👤 Mening profilim\n\nIsm: {name}\nTelefon: {phone}\n\nJami buyurtmalar: {total}{last}",
+        "profile_last":   "\nOxirgi buyurtma: {date}",
+        "profile_nophone": "ko'rsatilmagan",
+
+        # ── Operator ──
+        "operator_text":  "🎧 Operator uchun xabaringizni yozing:",
+        "operator_fwd":   "✅ Xabaringiz operatorga yuborildi.",
+
+        # ── Narxlar ──
+        "prices_title":   "💰 Narxlar",
+        "prices_empty":   "⚠️ Narxlar hali sozlanmagan. Kompaniyaga murojaat qiling.",
+        "prices_min_order_line": "📦 Minimal buyurtma: {min_order} {unit}",
     },
 }
 
@@ -203,11 +346,36 @@ def lang_kb() -> InlineKeyboardMarkup:
     ]])
 
 
-def menu_kb(lang: str) -> InlineKeyboardMarkup:
+def menu_kb(lang: str, site_url: str) -> InlineKeyboardMarkup:
+    """Главное меню — структура рядов как в прод-боте (menu_kb ~L719-729):
+    ссылка на сайт → «Оставить заявку» (ведёт в подменю быстрая/полная,
+    см. menu_order ниже) → статус+цены → калькулятор+профиль → оператор.
+    "Стать Агентом"/настройки языка из прод-бота сюда не перенесены (вне рамок задачи)."""
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_webapp"), url=site_url)],
         [InlineKeyboardButton(text=t(lang, "btn_order"), callback_data="menu_order")],
-        [InlineKeyboardButton(text=t(lang, "btn_order_full"), callback_data="menu_order_full")],
-        [InlineKeyboardButton(text=t(lang, "btn_calc"), callback_data="menu_calc")],
+        [InlineKeyboardButton(text=t(lang, "btn_status"), callback_data="menu_status"),
+         InlineKeyboardButton(text=t(lang, "btn_prices"), callback_data="menu_prices")],
+        [InlineKeyboardButton(text=t(lang, "btn_calc"), callback_data="menu_calc"),
+         InlineKeyboardButton(text=t(lang, "btn_profile"), callback_data="menu_profile")],
+        [InlineKeyboardButton(text=t(lang, "btn_operator"), callback_data="menu_operator")],
+    ])
+
+
+def status_menu_kb(lang: str, counts: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{t(lang, 'status_btn_new')} ({counts['new']})", callback_data="status_new"),
+         InlineKeyboardButton(text=f"{t(lang, 'status_btn_progress')} ({counts['progress']})", callback_data="status_progress")],
+        [InlineKeyboardButton(text=f"{t(lang, 'status_btn_done')} ({counts['done']})", callback_data="status_done"),
+         InlineKeyboardButton(text=f"{t(lang, 'status_btn_cancelled')} ({counts['cancelled']})", callback_data="status_cancelled")],
+        [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
+    ])
+
+
+def back_to_status_kb(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_back_to_status"), callback_data="menu_status")],
+        [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
     ])
 
 
@@ -373,6 +541,213 @@ def _notify_staff_new_lead(lead: dict) -> None:
         logging.warning(f"_notify_staff_new_lead error: {e}")
 
 
+def _h(value) -> str:
+    """HTML-экранирование для текста, идущего в message.answer()/bot.send_message() —
+    бот заказов создаётся с DefaultBotProperties(parse_mode="HTML") (main.py,
+    _get_order_bot_instance), поэтому любой пользовательский текст (имя из Telegram,
+    сообщение оператору, ответ сотрудника и т.п.), вставляемый в текст сообщения,
+    должен быть экранирован — иначе Telegram отклонит sendMessage при '<'/'&'/'>'
+    в исходных данных (can't parse entities)."""
+    return html.escape(str(value)) if value else ""
+
+
+def _company_site_url(slug: str) -> str:
+    """Ссылка на витрину компании для кнопки «Открыть приложение» — НЕ поддомен:
+    artez (единственная старая прод-компания на своём домене) → artez.uz,
+    остальные компании SaaS → cleano.uz/?company_slug=... (та же логика, что уже
+    используется в кнопке 🌐 на superadmin.html)."""
+    if slug == "artez":
+        return "https://artez.uz/"
+    return f"https://cleano.uz/?company_slug={slug}"
+
+
+async def _site_url(company_id: int) -> str:
+    try:
+        company = await db.get_company(company_id)
+    except Exception as e:
+        logging.warning(f"get_company error: {e}")
+        company = None
+    slug = (company["slug"] if company else "") or ""
+    return _company_site_url(slug) if slug else "https://cleano.uz/"
+
+
+def _join_names(lang: str, names: list[str]) -> str:
+    """Соединяет названия филиалов через 'и'/'va' (2 языка), 1 филиал — без союза."""
+    names = [n for n in names if n]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    sep = " va " if lang == "uz" else " и "
+    return ", ".join(names[:-1]) + sep + names[-1]
+
+
+def _branch_phone_list(branch: dict) -> list[str]:
+    """Номера телефонов филиала — phones это JSONB-массив объектов {n, receipt, site}.
+    asyncpg НЕ декодирует jsonb в dict/list автоматически (нет set_type_codec) —
+    приходит сырой JSON-строкой, тот же паттерн уже используется в main.py (~L6588,
+    d['phones'] = json.loads(...) if isinstance(str) else ...). Для меню бота нужен
+    только 'n' (receipt/site игнорируем, см. задание)."""
+    raw = branch.get("phones") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw else []
+        except (ValueError, TypeError):
+            raw = []
+    out = []
+    for p in raw:
+        num = p.get("n") if isinstance(p, dict) else p
+        if num:
+            out.append(str(num))
+    return out
+
+
+async def _build_menu_text(lang: str, company_id: int) -> str:
+    """Динамический текст главного меню (аналог статичного текста прод-бота,
+    см. задание): название компании + тэглайн, филиалы, короткий номер (если
+    задан), основной номер (всегда 2 строки), телефоны по филиалам."""
+    try:
+        company = await db.get_company(company_id)
+    except Exception as e:
+        logging.warning(f"get_company error: {e}")
+        company = None
+    company_name = (company["name"] if company else "") or ""
+
+    try:
+        tagline = await db.get_config_for_company(f"footer_about_{lang}", company_id)
+    except Exception as e:
+        logging.warning(f"get_config_for_company(footer_about_{lang}) error: {e}")
+        tagline = None
+
+    try:
+        branches = [dict(b) for b in await db.get_branches(company_id)]
+    except Exception as e:
+        logging.warning(f"get_branches error: {e}")
+        branches = []
+
+    try:
+        contact_short = await db.get_config_for_company("contact_short", company_id)
+    except Exception as e:
+        logging.warning(f"get_config_for_company(contact_short) error: {e}")
+        contact_short = None
+
+    try:
+        contact_main = await db.get_config_for_company("contact_main", company_id)
+    except Exception as e:
+        logging.warning(f"get_config_for_company(contact_main) error: {e}")
+        contact_main = None
+
+    lines = [t(lang, "menu_title"), ""]
+
+    header_line = _h(company_name)
+    if tagline:
+        header_line = f"{header_line} — {_h(tagline)}" if header_line else _h(tagline)
+    if header_line:
+        lines.append(header_line)
+
+    branch_names = [b.get(f"name_{lang}") or b.get("name_ru") or b.get("slug", "") for b in branches]
+    joined = _join_names(lang, branch_names)
+    if joined:
+        lines.append(f"📍 {_h(joined)}")
+
+    contact_lines = []
+    if contact_short:
+        contact_lines.append(t(lang, "contact_short_line").format(num=_h(contact_short)))
+    if contact_main:
+        contact_lines.append(t(lang, "contact_main_label"))
+        contact_lines.append(_h(contact_main))
+    if contact_lines:
+        lines.append("")
+        lines.extend(contact_lines)
+
+    if len(branches) == 1:
+        phones = _branch_phone_list(branches[0])
+        if phones:
+            lines.append("")
+            lines.extend(f"📱 {_h(p)}" for p in phones)
+    elif len(branches) > 1:
+        for b in branches:
+            phones = _branch_phone_list(b)
+            if not phones:
+                continue
+            lines.append("")
+            bname = b.get(f"name_{lang}") or b.get("name_ru") or b.get("slug", "")
+            lines.append(_h(bname))
+            lines.extend(f"📱 {_h(p)}" for p in phones)
+
+    return "\n".join(lines)
+
+
+async def _show_menu(target, lang: str, company_id: int) -> None:
+    """target — Message/CallbackQuery.message. Показывает динамическое главное меню
+    (текст + клавиатура с корректной ссылкой на витрину компании)."""
+    header = await _build_menu_text(lang, company_id)
+    site_url = await _site_url(company_id)
+    await target.answer(header, reply_markup=menu_kb(lang, site_url))
+
+
+async def _build_prices_text(lang: str, company_id: int) -> str:
+    """Текстовый прайс-лист — переиспользует те же источники данных, что и
+    CalcForm (db.get_services_for_company/db.get_all_prices/_unit_symbol),
+    вдохновлено build_prices_text() из прод-бота (не копия 1:1, см. задание)."""
+    try:
+        services = await db.get_services_for_company(company_id)
+    except Exception as e:
+        logging.warning(f"get_services_for_company error: {e}")
+        services = []
+    try:
+        prices = await db.get_all_prices()
+    except Exception as e:
+        logging.warning(f"get_all_prices error: {e}")
+        prices = {}
+
+    currency = "so'm" if lang == "uz" else "сум"
+    lines = [t(lang, "prices_title"), ""]
+    any_price = False
+
+    ordered = sorted(services, key=lambda s: s.get("order_idx", 0)) if services else []
+    for s in ordered:
+        key = s.get("key")
+        entry = prices.get(key, {})
+        std = entry.get("standard")
+        exp = entry.get("express")
+        if not std and not exp:
+            continue
+        any_price = True
+        name = _svc_display_name(lang, services, key)
+        unit_key = (std or exp).get("unit_key") or "m2"
+        unit_sym = await _unit_symbol(unit_key, lang)
+        parts = []
+        if std:
+            parts.append(f"{std['price']:,}".replace(",", " "))
+        if exp:
+            parts.append(f"{exp['price']:,}".replace(",", " "))
+        lines.append(f"🔹 {_h(name)}")
+        lines.append(f"— {' / '.join(parts)} {currency}/{unit_sym}")
+        if std and std.get("min_order"):
+            mo = std["min_order"]
+            mo_str = int(mo) if mo == int(mo) else mo
+            lines.append(t(lang, "prices_min_order_line").format(min_order=mo_str, unit=unit_sym))
+
+    if not any_price:
+        lines.append(t(lang, "prices_empty"))
+
+    return "\n".join(lines)
+
+
+async def _resolve_operator_group_id(company_id: int) -> str | None:
+    """Группа для эскалации «Оператор» — переиспользует тот же конфиг-ключ,
+    которым роутится обычный поток лидов без привязки к филиалу (main.py/
+    _notify_new_lead, ключ leads_group_id — общий fallback, когда branch неизвестен).
+    Филиальный роутинг по tg_leads_group_id здесь не нужен: OperatorForm не
+    спрашивает у клиента филиал (в отличие от QuickForm/OrderForm)."""
+    try:
+        return await db.get_config_for_company("leads_group_id", company_id)
+    except Exception as e:
+        logging.warning(f"get_config_for_company(leads_group_id) error: {e}")
+        return None
+
+
 # ══════════════════════════════════════
 #  /start и язык
 # ══════════════════════════════════════
@@ -395,7 +770,7 @@ async def start(message: Message, company_id: int, state: FSMContext) -> None:
 
     if lang:
         await state.update_data(lang=lang)
-        await message.answer(t(lang, "menu_title"), reply_markup=menu_kb(lang))
+        await _show_menu(message, lang, company_id)
     else:
         await message.answer(t("ru", "hello"), reply_markup=lang_kb())
 
@@ -411,7 +786,7 @@ async def set_language(call: CallbackQuery, company_id: int, state: FSMContext) 
     except Exception as e:
         logging.warning(f"set_bot_client_lang error: {e}")
     await call.message.edit_text(t(lang, "lang_set"))
-    await call.message.answer(t(lang, "menu_title"), reply_markup=menu_kb(lang))
+    await _show_menu(call.message, lang, company_id)
 
 
 @router.callback_query(F.data == "go_menu")
@@ -424,7 +799,7 @@ async def go_menu(call: CallbackQuery, company_id: int, state: FSMContext) -> No
         await call.message.answer(t("ru", "hello"), reply_markup=lang_kb())
         return
     await state.update_data(lang=lang)
-    await call.message.answer(t(lang, "menu_title"), reply_markup=menu_kb(lang))
+    await _show_menu(call.message, lang, company_id)
 
 
 @router.callback_query(F.data == "cancel_order")
@@ -434,14 +809,31 @@ async def cancel_order(call: CallbackQuery, company_id: int, state: FSMContext) 
     lang = data.get("lang", "ru")
     await state.clear()
     await state.update_data(lang=lang)
-    await call.message.answer(t(lang, "cancelled"), reply_markup=menu_kb(lang))
+    site_url = await _site_url(company_id)
+    await call.message.answer(t(lang, "cancelled"), reply_markup=menu_kb(lang, site_url))
 
 
 # ══════════════════════════════════════
-#  БЫСТРЫЙ ЗАКАЗ: услуга → телефон → имя → сохранение
+#  «ОСТАВИТЬ ЗАЯВКУ»: подменю быстрая/полная (как menu_order() в прод-боте,
+#  ~L1674) → order_type_quick ведёт в QuickForm, order_type_full — в OrderForm
+#  (те же имена callback'ов, что и в проде, ~L1679/1693 — задание явно просит
+#  зарезервировать эти имена под новую структуру).
 # ══════════════════════════════════════
 @router.callback_query(F.data == "menu_order")
 async def menu_order(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_order_quick"), callback_data="order_type_quick")],
+        [InlineKeyboardButton(text=t(lang, "btn_order_full"), callback_data="order_type_full")],
+        [InlineKeyboardButton(text=t(lang, "btn_cancel"), callback_data="cancel_order")],
+    ])
+    await call.message.answer(t(lang, "ask_order_type"), reply_markup=kb)
+
+
+@router.callback_query(F.data == "order_type_quick")
+async def menu_order_quick(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
     await call.answer()
     data = await state.get_data()
     lang = data.get("lang", "ru")
@@ -469,6 +861,19 @@ async def _finish_phone_step(message: Message, company_id: int, state: FSMContex
     data = await state.get_data()
     lang = data.get("lang", "ru")
     await state.update_data(phone=phone)
+    # Сохраняем телефон в clients — иначе «Мой профиль» никогда не узнает номер
+    # (upsert_bot_client в /start вызывается без phone). COALESCE в самом
+    # upsert_bot_client не даст затереть уже сохранённый номер пустым.
+    try:
+        await db.upsert_bot_client(
+            tg_id=message.from_user.id, company_id=company_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            phone=phone, lang=lang,
+        )
+    except Exception as e:
+        logging.warning(f"upsert_bot_client (phone) error: {e}")
     await state.set_state(QuickForm.name)
     await message.answer("✅", reply_markup=ReplyKeyboardRemove())
     await message.answer(t(lang, "ask_name"), reply_markup=cancel_kb(lang))
@@ -540,7 +945,7 @@ async def quick_name(message: Message, company_id: int, state: FSMContext) -> No
 #  ПОЛНЫЙ ЗАКАЗ: имя → телефон → филиал → адрес → услуга → тип → дата → время → сохранение
 #  (реальный порядок шагов из старого bot.py, см. docstring модуля и класса OrderForm)
 # ══════════════════════════════════════
-@router.callback_query(F.data == "menu_order_full")
+@router.callback_query(F.data == "order_type_full")
 async def menu_order_full(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
     await call.answer()
     data = await state.get_data()
@@ -566,6 +971,17 @@ async def _advance_after_phone(message: Message, company_id: int, state: FSMCont
     data = await state.get_data()
     lang = data.get("lang", "ru")
     await state.update_data(phone=phone)
+    # См. комментарий в _finish_phone_step (QuickForm) — тот же фикс для OrderForm.
+    try:
+        await db.upsert_bot_client(
+            tg_id=message.from_user.id, company_id=company_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            phone=phone, lang=lang,
+        )
+    except Exception as e:
+        logging.warning(f"upsert_bot_client (phone) error: {e}")
     try:
         branches = await db.get_branches(company_id)
     except Exception as e:
@@ -945,6 +1361,253 @@ async def calc_length(message: Message, company_id: int, state: FSMContext) -> N
 
 
 # ══════════════════════════════════════
+#  СТАТУС ЗАКАЗА — заказы клиента (db.get_client_orders_by_tg), сгруппированные
+#  по STATUS_GROUPS (см. верх файла). Перенесено из прод-бота (menu_status/
+#  show_status_group, ~L1436-1503), с реальными статусами SaaS-схемы orders.
+# ══════════════════════════════════════
+@router.callback_query(F.data == "menu_status")
+async def menu_status(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    uid = call.from_user.id
+
+    try:
+        orders = await db.get_client_orders_by_tg(uid, company_id)
+    except Exception as e:
+        logging.warning(f"get_client_orders_by_tg error: {e}")
+        orders = []
+
+    if not orders:
+        kb_empty = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t(lang, "btn_order"), callback_data="menu_order")],
+            [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
+        ])
+        await call.message.answer(t(lang, "status_empty"), reply_markup=kb_empty)
+        return
+
+    counts = {"new": 0, "progress": 0, "done": 0, "cancelled": 0}
+    for o in orders:
+        for group, statuses in STATUS_GROUPS.items():
+            if o["status"] in statuses:
+                counts[group] += 1
+                break
+
+    await call.message.answer(t(lang, "status_menu_title"), reply_markup=status_menu_kb(lang, counts))
+
+
+@router.callback_query(F.data.in_({"status_new", "status_progress", "status_done", "status_cancelled"}))
+async def show_status_group(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    group = call.data.replace("status_", "")
+    statuses = STATUS_GROUPS.get(group, [])
+    uid = call.from_user.id
+
+    try:
+        orders = await db.get_client_orders_by_tg(uid, company_id)
+    except Exception as e:
+        logging.warning(f"get_client_orders_by_tg error: {e}")
+        orders = []
+    filtered = [o for o in orders if o["status"] in statuses]
+
+    group_title_keys = {
+        "new": "status_btn_new", "progress": "status_btn_progress",
+        "done": "status_btn_done", "cancelled": "status_btn_cancelled",
+    }
+    title = t(lang, group_title_keys.get(group, "status_btn_new"))
+
+    if not filtered:
+        text = f"{title}\n\n" + t(lang, "status_group_empty")
+    else:
+        lines = [f"{title}\n"]
+        for o in filtered:
+            lines.append(t(lang, "status_order_line").format(
+                num=_h(o.get("order_num", "")),
+                service=_h(o.get("service") or ""),
+                date=_h(o.get("pickup_date") or ""),
+                status=_order_status_name(lang, o["status"]),
+            ))
+        text = "\n\n".join(lines)
+
+    await call.message.answer(text, reply_markup=back_to_status_kb(lang))
+
+
+# ══════════════════════════════════════
+#  ЦЕНЫ — текстовый прайс-лист (см. _build_prices_text выше).
+# ══════════════════════════════════════
+@router.callback_query(F.data == "menu_prices")
+async def menu_prices(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    text = await _build_prices_text(lang, company_id)
+    await call.message.answer(text, reply_markup=back_kb(lang))
+
+
+# ══════════════════════════════════════
+#  МОЙ ПРОФИЛЬ — имя из Telegram (как в прод-боте, НЕ из БД), телефон/заказы —
+#  из БД. Без агентской программы/настроек (вне рамок задачи, см. задание).
+# ══════════════════════════════════════
+@router.callback_query(F.data == "menu_profile")
+async def menu_profile(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    uid = call.from_user.id
+
+    try:
+        client = await db.get_bot_client_by_tg_id(uid, company_id)
+    except Exception as e:
+        logging.warning(f"get_bot_client_by_tg_id error: {e}")
+        client = None
+    try:
+        orders = await db.get_client_orders_by_tg(uid, company_id)
+    except Exception as e:
+        logging.warning(f"get_client_orders_by_tg error: {e}")
+        orders = []
+
+    total = len(orders)
+    last_line = ""
+    if orders:
+        ts = orders[0].get("created_at")
+        if ts:
+            last_d = ts.strftime("%d.%m.%Y") if hasattr(ts, "strftime") else str(ts)[:10]
+            last_line = t(lang, "profile_last").format(date=last_d)
+
+    name_parts = [call.from_user.first_name or "", call.from_user.last_name or ""]
+    name = " ".join(p for p in name_parts if p) or "—"
+    phone = (client or {}).get("phone") or t(lang, "profile_nophone")
+
+    text = t(lang, "profile_text").format(
+        name=_h(name), phone=_h(phone), total=total, last=last_line,
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
+    ])
+    await call.message.answer(text, reply_markup=kb)
+
+
+# ══════════════════════════════════════
+#  ОПЕРАТОР — клиент пишет сообщение (OperatorForm) → уходит в TG-группу лидов
+#  компании (_resolve_operator_group_id выше) с кнопкой «Ответить клиенту» →
+#  сотрудник нажимает её (admin_reply_start/AdminReplyForm) → следующее его
+#  сообщение пересылается клиенту (admin_reply_send). Перенесено из прод-бота
+#  (menu_operator/operator_message/admin_reply_start, ~L1577-1671).
+# ══════════════════════════════════════
+@router.callback_query(F.data == "menu_operator")
+async def menu_operator(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    await state.set_state(OperatorForm.message)
+    await call.message.answer(t(lang, "operator_text"), reply_markup=cancel_kb(lang))
+
+
+@router.message(OperatorForm.message)
+async def operator_message(message: Message, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    uid = message.from_user.id
+    username = message.from_user.username or ""
+    fullname = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip() or "—"
+    text_body = (message.text or "").strip()
+
+    if not text_body:
+        await message.answer(t(lang, "operator_text"), reply_markup=cancel_kb(lang))
+        return
+
+    group_id = await _resolve_operator_group_id(company_id)
+    if group_id:
+        tg_link = f"tg://user?id={uid}"
+        group_text = (
+            f"💬 <b>Сообщение от клиента</b>\n"
+            f"━━━━━━━━━━\n"
+            f"👤 {_h(fullname)}" + (f" | @{_h(username)}" if username else "") + "\n"
+            f"🆔 <code>{uid}</code>\n"
+            f"━━━━━━━━━━\n"
+            f"📝 {_h(text_body)}\n"
+            f"━━━━━━━━━━"
+        )
+        reply_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Ответить клиенту", callback_data=f"reply_to_{uid}")],
+            [InlineKeyboardButton(text="📱 Открыть чат", url=tg_link)],
+        ])
+        try:
+            await message.bot.send_message(int(group_id), group_text, reply_markup=reply_kb)
+        except Exception as e:
+            logging.error(f"operator_message: send to group failed: {e}")
+    else:
+        logging.warning(f"operator_message: no leads_group_id configured for company_id={company_id}")
+
+    await state.clear()
+    await state.update_data(lang=lang)
+    await message.answer(t(lang, "operator_fwd"), reply_markup=back_kb(lang))
+
+
+@router.callback_query(F.data.startswith("reply_to_"))
+async def admin_reply_start(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    """Сотрудник (не клиент!) нажал «Ответить клиенту» в группе — FSM-ключ здесь
+    строится по (chat_id группы, tg_id сотрудника), см. PostgresStorage."""
+    await call.answer()
+    try:
+        client_id = int(call.data.replace("reply_to_", ""))
+    except ValueError:
+        return
+    await state.set_state(AdminReplyForm.waiting_reply)
+    await state.update_data(reply_to_client=client_id)
+    await call.message.answer(
+        f"✏️ Напишите ответ клиенту {client_id}:\n(следующее сообщение будет отправлено ему)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin_reply"),
+        ]]),
+    )
+
+
+@router.callback_query(F.data == "cancel_admin_reply")
+async def admin_reply_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await state.clear()
+    try:
+        await call.message.edit_text("❌ Отменено.")
+    except Exception:
+        pass
+
+
+@router.message(AdminReplyForm.waiting_reply)
+async def admin_reply_send(message: Message, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    client_id = data.get("reply_to_client")
+    reply_text = (message.text or "").strip()
+
+    if client_id and reply_text:
+        try:
+            client_lang = await db.get_bot_client_lang(client_id, company_id) or "ru"
+        except Exception as e:
+            logging.warning(f"get_bot_client_lang error: {e}")
+            client_lang = "ru"
+        client_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t(client_lang, "btn_operator"), callback_data="menu_operator")],
+            [InlineKeyboardButton(text=t(client_lang, "btn_menu"), callback_data="go_menu")],
+        ])
+        try:
+            await message.bot.send_message(
+                client_id,
+                f"📩 <b>Сообщение от оператора</b>\n\n{_h(reply_text)}",
+                reply_markup=client_kb,
+            )
+            await message.answer(f"✅ Ответ отправлен клиенту {client_id}")
+        except Exception as e:
+            logging.error(f"admin_reply_send error: {e}")
+            await message.answer(f"⚠️ Не удалось отправить: {e}")
+    else:
+        await message.answer("⚠️ Не удалось определить клиента для ответа.")
+
+    await state.clear()
+
+
+# ══════════════════════════════════════
 #  СОТРУДНИКИ: «Взять лид» — кнопка в уведомлении о новом лиде (_notify_new_lead,
 #  main.py). Логика зеркалит /api/tg/webhook (легаси, single-tenant), но здесь —
 #  через db.take_lead(), уже принимающий явный company_id.
@@ -1003,12 +1666,15 @@ async def cb_take_lead(call: CallbackQuery, company_id: int) -> None:
 # ══════════════════════════════════════
 #  ФОЛЛБЕК: любой другой текст вне известных состояний
 # ══════════════════════════════════════
-@router.message(F.text)
+@router.message(F.chat.type == "private", F.text)
 async def echo_fallback(message: Message, company_id: int, state: FSMContext) -> None:
     """Ловит текст вне известных шагов формы (например, если ждали нажатия кнопки) —
-    просто возвращает клиента в главное меню."""
+    просто возвращает клиента в главное меню. Ограничено приватными чатами: бот
+    теперь состоит в группе лидов (уведомления/«Взять лид»/«Оператор»→«Ответить»),
+    и без этого фильтра любое сообщение сотрудника в группе (не по теме "Ответить")
+    получало бы в ответ клиентское меню — фильтр по chat.type это предотвращает."""
     data = await state.get_data()
     lang = data.get("lang") or await _resolve_lang(message.from_user.id, company_id, state) or "ru"
     await state.clear()
     await state.update_data(lang=lang)
-    await message.answer(t(lang, "menu_title"), reply_markup=menu_kb(lang))
+    await _show_menu(message, lang, company_id)
