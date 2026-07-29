@@ -231,9 +231,14 @@ T = {
         "btn_back_to_status": "◀️ К категориям",
 
         # ── Мой профиль ──
-        "profile_text":   "👤 Мой профиль\n\nИмя: {name}\nТелефон: {phone}\n\nЗаказов всего: {total}{last}",
+        "profile_text":   "👤 Ваш профиль\n\n📛 Имя: {name}\n📞 Телефон: {phone}\n🆔 ID: {uid}\n\n📊 Заявок всего: {total}\n✅ Выполнено: {done}{last}",
         "profile_last":   "\nПоследний заказ: {date}",
         "profile_nophone": "не указан",
+        "btn_settings":   "⚙️ Настройки",
+        "settings_text":  "⚙️ Настройки",
+        "btn_change_lang": "🌐 Сменить язык",
+        "btn_help":       "🆘 Помощь",
+        "help_text":      "🆘 Помощь\n\nЕсли у вас возник вопрос — воспользуйтесь кнопкой «🎧 Оператор» в главном меню, или позвоните нам.",
 
         # ── Оператор ──
         "operator_text":  "🎧 Напишите ваше сообщение для оператора:",
@@ -316,9 +321,14 @@ T = {
         "btn_back_to_status": "◀️ Kategoriyalarga",
 
         # ── Mening profilim ──
-        "profile_text":   "👤 Mening profilim\n\nIsm: {name}\nTelefon: {phone}\n\nJami buyurtmalar: {total}{last}",
+        "profile_text":   "👤 Sizning profilingiz\n\n📛 Ism: {name}\n📞 Telefon: {phone}\n🆔 ID: {uid}\n\n📊 Jami buyurtmalar: {total}\n✅ Bajarildi: {done}{last}",
         "profile_last":   "\nOxirgi buyurtma: {date}",
         "profile_nophone": "ko'rsatilmagan",
+        "btn_settings":   "⚙️ Sozlamalar",
+        "settings_text":  "⚙️ Sozlamalar",
+        "btn_change_lang": "🌐 Tilni o'zgartirish",
+        "btn_help":       "🆘 Yordam",
+        "help_text":      "🆘 Yordam\n\nSavolingiz bo'lsa — asosiy menyudagi «🎧 Operator» tugmasidan foydalaning, yoki bizga qo'ng'iroq qiling.",
 
         # ── Operator ──
         "operator_text":  "🎧 Operator uchun xabaringizni yozing:",
@@ -1448,7 +1458,9 @@ async def menu_prices(call: CallbackQuery, company_id: int, state: FSMContext) -
 
 # ══════════════════════════════════════
 #  МОЙ ПРОФИЛЬ — имя из Telegram (как в прод-боте, НЕ из БД), телефон/заказы —
-#  из БД. Без агентской программы/настроек (вне рамок задачи, см. задание).
+#  из БД. Формат сверен с прод-ботом (📛/📞/🆔/📊/✅). Без «Стать Агентом» —
+#  агентская программа сейчас завязана на функции без корректного company_id
+#  (get_user_by_tg_id/get_user_by_phone), делается отдельным этапом, не здесь.
 # ══════════════════════════════════════
 @router.callback_query(F.data == "menu_profile")
 async def menu_profile(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
@@ -1469,6 +1481,7 @@ async def menu_profile(call: CallbackQuery, company_id: int, state: FSMContext) 
         orders = []
 
     total = len(orders)
+    done = sum(1 for o in orders if o.get("status") in STATUS_GROUPS["done"])
     last_line = ""
     if orders:
         ts = orders[0].get("created_at")
@@ -1481,12 +1494,45 @@ async def menu_profile(call: CallbackQuery, company_id: int, state: FSMContext) 
     phone = (client or {}).get("phone") or t(lang, "profile_nophone")
 
     text = t(lang, "profile_text").format(
-        name=_h(name), phone=_h(phone), total=total, last=last_line,
+        name=_h(name), phone=_h(phone), uid=uid, total=total, done=done, last=last_line,
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_settings"), callback_data="menu_settings")],
         [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
     ])
     await call.message.answer(text, reply_markup=kb)
+
+
+def settings_kb(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_change_lang"), callback_data="settings_lang")],
+        [InlineKeyboardButton(text=t(lang, "btn_help"), callback_data="menu_help")],
+        [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
+    ])
+
+
+@router.callback_query(F.data == "menu_settings")
+async def menu_settings(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    await call.message.answer(t(lang, "settings_text"), reply_markup=settings_kb(lang))
+
+
+@router.callback_query(F.data == "settings_lang")
+async def settings_lang(call: CallbackQuery, state: FSMContext) -> None:
+    """Показывает выбор языка повторно — обрабатывается уже существующим
+    set_language (callback_data lang_ru/lang_uz), как при первом /start."""
+    await call.answer()
+    await call.message.answer(t("ru", "hello"), reply_markup=lang_kb())
+
+
+@router.callback_query(F.data == "menu_help")
+async def menu_help(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    await call.message.answer(t(lang, "help_text"), reply_markup=back_kb(lang))
 
 
 # ══════════════════════════════════════
