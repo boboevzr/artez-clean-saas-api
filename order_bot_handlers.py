@@ -228,6 +228,8 @@ T = {
         "status_btn_cancelled": "❌ Отменены",
         "status_group_empty": "В этой категории заявок нет.",
         "status_order_line":  "📋 №{num}\n🧺 {service}\n📅 {date}\n📌 Статус: {status}",
+        "status_lead_line":   "📋 Заявка {num}\n🧺 {service}\n📌 Статус: 🆕 Новая заявка, ожидайте звонка",
+        "status_lead_lost_line": "📋 Заявка {num}\n📌 Статус: ❌ Отменена",
         "btn_back_to_status": "◀️ К категориям",
 
         # ── Мой профиль ──
@@ -318,6 +320,8 @@ T = {
         "status_btn_cancelled": "❌ Bekor qilindi",
         "status_group_empty": "Bu kategoriyada buyurtmalar yo'q.",
         "status_order_line":  "📋 №{num}\n🧺 {service}\n📅 {date}\n📌 Holat: {status}",
+        "status_lead_line":   "📋 Ariza {num}\n🧺 {service}\n📌 Holat: 🆕 Yangi ariza, qo'ng'iroqni kuting",
+        "status_lead_lost_line": "📋 Ariza {num}\n📌 Holat: ❌ Bekor qilindi",
         "btn_back_to_status": "◀️ Kategoriyalarga",
 
         # ── Mening profilim ──
@@ -1371,10 +1375,45 @@ async def calc_length(message: Message, company_id: int, state: FSMContext) -> N
 
 
 # ══════════════════════════════════════
-#  СТАТУС ЗАКАЗА — заказы клиента (db.get_client_orders_by_tg), сгруппированные
-#  по STATUS_GROUPS (см. верх файла). Перенесено из прод-бота (menu_status/
-#  show_status_group, ~L1436-1503), с реальными статусами SaaS-схемы orders.
+#  СТАТУС ЗАКАЗА — бот всегда создаёт ЛИД (никогда заказ напрямую), поэтому
+#  «Статус заказа» показывает ДВА разных источника, не только orders:
+#  - 🆕 Новые   = лиды клиента (client_tg_id), ещё не converted/lost — лид
+#                 существует, но заказ из него ещё не создан сотрудником.
+#  - 🔄 В работе = заказы (orders), НЕ delivered/cancelled — найдены НЕ по
+#                 client_tg_id (при конвертации лида в заказ client_tg_id не
+#                 копируется, см. convert_lead_to_order в main.py), а по ЛЮБОМУ
+#                 телефону, который клиент когда-либо указывал: свой профильный
+#                 (clients.phone) + все телефоны с его же лидов — клиент мог
+#                 при заказе назвать другой номер, не тот что в Telegram.
+#  - ✅ Выполнено = заказы со статусом delivered (по тем же телефонам).
+#  - ❌ Отменены  = лиды со статусом lost + заказы со статусом cancelled.
 # ══════════════════════════════════════
+async def _gather_status_data(uid: int, company_id: int) -> tuple[list[dict], list[dict]]:
+    try:
+        leads = await db.get_client_leads_by_tg(uid, company_id)
+    except Exception as e:
+        logging.warning(f"get_client_leads_by_tg error: {e}")
+        leads = []
+
+    phones = set()
+    try:
+        client = await db.get_bot_client_by_tg_id(uid, company_id)
+        if client and client.get("phone"):
+            phones.add(client["phone"])
+    except Exception as e:
+        logging.warning(f"get_bot_client_by_tg_id error: {e}")
+    for l in leads:
+        if l.get("client_phone"):
+            phones.add(l["client_phone"])
+
+    try:
+        orders = await db.get_orders_by_phones(list(phones), company_id) if phones else []
+    except Exception as e:
+        logging.warning(f"get_orders_by_phones error: {e}")
+        orders = []
+    return leads, orders
+
+
 @router.callback_query(F.data == "menu_status")
 async def menu_status(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
     await call.answer()
@@ -1382,13 +1421,9 @@ async def menu_status(call: CallbackQuery, company_id: int, state: FSMContext) -
     lang = data.get("lang", "ru")
     uid = call.from_user.id
 
-    try:
-        orders = await db.get_client_orders_by_tg(uid, company_id)
-    except Exception as e:
-        logging.warning(f"get_client_orders_by_tg error: {e}")
-        orders = []
+    leads, orders = await _gather_status_data(uid, company_id)
 
-    if not orders:
+    if not leads and not orders:
         kb_empty = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t(lang, "btn_order"), callback_data="menu_order")],
             [InlineKeyboardButton(text=t(lang, "btn_menu"), callback_data="go_menu")],
@@ -1396,12 +1431,13 @@ async def menu_status(call: CallbackQuery, company_id: int, state: FSMContext) -
         await call.message.answer(t(lang, "status_empty"), reply_markup=kb_empty)
         return
 
-    counts = {"new": 0, "progress": 0, "done": 0, "cancelled": 0}
-    for o in orders:
-        for group, statuses in STATUS_GROUPS.items():
-            if o["status"] in statuses:
-                counts[group] += 1
-                break
+    counts = {
+        "new":       sum(1 for l in leads if l.get("status") not in ("converted", "lost")),
+        "progress":  sum(1 for o in orders if o.get("status") not in ("delivered", "cancelled")),
+        "done":      sum(1 for o in orders if o.get("status") == "delivered"),
+        "cancelled": sum(1 for l in leads if l.get("status") == "lost")
+                     + sum(1 for o in orders if o.get("status") == "cancelled"),
+    }
 
     await call.message.answer(t(lang, "status_menu_title"), reply_markup=status_menu_kb(lang, counts))
 
@@ -1412,15 +1448,48 @@ async def show_status_group(call: CallbackQuery, company_id: int, state: FSMCont
     data = await state.get_data()
     lang = data.get("lang", "ru")
     group = call.data.replace("status_", "")
-    statuses = STATUS_GROUPS.get(group, [])
     uid = call.from_user.id
 
-    try:
-        orders = await db.get_client_orders_by_tg(uid, company_id)
-    except Exception as e:
-        logging.warning(f"get_client_orders_by_tg error: {e}")
-        orders = []
-    filtered = [o for o in orders if o["status"] in statuses]
+    leads, orders = await _gather_status_data(uid, company_id)
+
+    lines = []
+    if group == "new":
+        for l in leads:
+            if l.get("status") in ("converted", "lost"):
+                continue
+            lines.append(t(lang, "status_lead_line").format(
+                num=_h(l.get("lead_code") or l.get("lead_num") or f"#{l.get('id','')}"),
+                service=_h(l.get("service") or l.get("note") or ""),
+            ))
+    elif group == "progress":
+        for o in orders:
+            if o.get("status") in ("delivered", "cancelled"):
+                continue
+            lines.append(t(lang, "status_order_line").format(
+                num=_h(o.get("order_num", "")), service=_h(o.get("service") or ""),
+                date=_h(o.get("pickup_date") or ""), status=_order_status_name(lang, o["status"]),
+            ))
+    elif group == "done":
+        for o in orders:
+            if o.get("status") != "delivered":
+                continue
+            lines.append(t(lang, "status_order_line").format(
+                num=_h(o.get("order_num", "")), service=_h(o.get("service") or ""),
+                date=_h(o.get("pickup_date") or ""), status=_order_status_name(lang, o["status"]),
+            ))
+    elif group == "cancelled":
+        for l in leads:
+            if l.get("status") != "lost":
+                continue
+            lines.append(t(lang, "status_lead_lost_line").format(
+                num=_h(l.get("lead_code") or l.get("lead_num") or f"#{l.get('id','')}")))
+        for o in orders:
+            if o.get("status") != "cancelled":
+                continue
+            lines.append(t(lang, "status_order_line").format(
+                num=_h(o.get("order_num", "")), service=_h(o.get("service") or ""),
+                date=_h(o.get("pickup_date") or ""), status=_order_status_name(lang, o["status"]),
+            ))
 
     group_title_keys = {
         "new": "status_btn_new", "progress": "status_btn_progress",
@@ -1428,18 +1497,10 @@ async def show_status_group(call: CallbackQuery, company_id: int, state: FSMCont
     }
     title = t(lang, group_title_keys.get(group, "status_btn_new"))
 
-    if not filtered:
+    if not lines:
         text = f"{title}\n\n" + t(lang, "status_group_empty")
     else:
-        lines = [f"{title}\n"]
-        for o in filtered:
-            lines.append(t(lang, "status_order_line").format(
-                num=_h(o.get("order_num", "")),
-                service=_h(o.get("service") or ""),
-                date=_h(o.get("pickup_date") or ""),
-                status=_order_status_name(lang, o["status"]),
-            ))
-        text = "\n\n".join(lines)
+        text = "\n\n".join([f"{title}\n"] + lines)
 
     await call.message.answer(text, reply_markup=back_to_status_kb(lang))
 
@@ -1461,6 +1522,11 @@ async def menu_prices(call: CallbackQuery, company_id: int, state: FSMContext) -
 #  из БД. Формат сверен с прод-ботом (📛/📞/🆔/📊/✅). Без «Стать Агентом» —
 #  агентская программа сейчас завязана на функции без корректного company_id
 #  (get_user_by_tg_id/get_user_by_phone), делается отдельным этапом, не здесь.
+#
+#  Заказы для статистики ищутся ТАК ЖЕ, как в «Статус заказа» (_gather_status_data,
+#  по телефону, не по client_tg_id) — бот никогда не создаёт заказ напрямую, и
+#  при конвертации лида в заказ client_tg_id не переносится, так что поиск по
+#  одному только tg_id почти всегда возвращал бы 0 заказов у реальных клиентов.
 # ══════════════════════════════════════
 @router.callback_query(F.data == "menu_profile")
 async def menu_profile(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
@@ -1474,11 +1540,7 @@ async def menu_profile(call: CallbackQuery, company_id: int, state: FSMContext) 
     except Exception as e:
         logging.warning(f"get_bot_client_by_tg_id error: {e}")
         client = None
-    try:
-        orders = await db.get_client_orders_by_tg(uid, company_id)
-    except Exception as e:
-        logging.warning(f"get_client_orders_by_tg error: {e}")
-        orders = []
+    _, orders = await _gather_status_data(uid, company_id)
 
     total = len(orders)
     done = sum(1 for o in orders if o.get("status") in STATUS_GROUPS["done"])

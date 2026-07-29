@@ -7190,13 +7190,38 @@ async def get_services_for_company(company_id: int) -> list[dict]:
 
 async def get_client_orders_by_tg(tg_id: int, company_id: int) -> list[dict]:
     """Заказы клиента бота заказов (order_bot_handlers.py) по client_tg_id — для
-    разделов «Статус заказа» и «Мой профиль». Явный company_id (вебхук общий на
-    все компании), от новых к старым."""
+    раздела «Мой профиль» (статистика всего/выполнено). Явный company_id (вебхук
+    общий на все компании), от новых к старым."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT * FROM orders WHERE client_tg_id=$1 AND company_id=$2 ORDER BY created_at DESC",
             tg_id, company_id)
+        return [dict(r) for r in rows]
+
+async def get_client_leads_by_tg(tg_id: int, company_id: int) -> list[dict]:
+    """Лиды клиента бота заказов по client_tg_id — раздел «Статус заказа».
+    Бот всегда создаёт лид (не заказ напрямую), поэтому «новые» заявки клиента
+    ищутся здесь, а не в orders. Явный company_id (вебхук общий на все компании)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM leads WHERE client_tg_id=$1 AND company_id=$2 ORDER BY created_at DESC",
+            tg_id, company_id)
+        return [dict(r) for r in rows]
+
+async def get_orders_by_phones(phones: list[str], company_id: int) -> list[dict]:
+    """Заказы клиента по номерам телефона — «Статус заказа» ищет заказы не
+    только по client_tg_id (сотрудник мог создать заказ вручную/конвертировать
+    лид в заказ, не сохранив client_tg_id), а по ЛЮБОМУ телефону, который клиент
+    когда-либо указывал (свой профильный + все из его лидов — при конвертации
+    лида в заказ телефон копируется из лида, но сам лид не привязывается к
+    получившемуся order_num, см. convert_lead_to_order в main.py)."""
+    if not pool or not phones: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM orders WHERE client_phone = ANY($1) AND company_id=$2 ORDER BY created_at DESC",
+            phones, company_id)
         return [dict(r) for r in rows]
 
 async def get_staff_by_role(company_id: int, role: str) -> list:
