@@ -119,6 +119,13 @@ class AgentForm(StatesGroup):
     waiting_contact = State()
 
 
+class DriverPaymentForm(StatesGroup):
+    """«Доставлено» с оплатой — водитель выбрал способ оплаты (drv_pay_method_),
+    ждём сумму текстом. Недоплата < 1000 сум — авто-скидка, иначе заявка
+    менеджеру (см. handle_payment_amount в старом bot.py, ~L3792)."""
+    waiting_amount = State()
+
+
 # Группировка статусов заказа для раздела «Статус заказа» — перенесено из
 # старого bot.py (STATUS_GROUPS/ORDER_STATUS_NAMES_*, ~L550-582), значения
 # статусов сверены с ALL_ORDER_STATUSES в main.py (реальный список, не выдумано).
@@ -285,6 +292,19 @@ T = {
         "route_delivered": "✅ Доставлено.",
         "route_delivered_debt": "✅ Доставлено.\n❗ Долг: {debt} сум",
         "route_action_error": "⚠️ Не удалось выполнить: {error}",
+
+        # ── Оплата при доставке (этап 3, под-этап 2) ──
+        "pay_ask_method": "💰 Ожидаемая сумма: {expected} сум\n\nКак оплатил клиент?",
+        "btn_pay_cash": "💵 Наличные",
+        "btn_pay_card": "💳 Карта",
+        "btn_pay_transfer": "🏦 Перевод",
+        "btn_pay_none": "🚫 Без оплаты",
+        "pay_ask_amount": "✏️ Введите полученную сумму (например: {expected}):",
+        "pay_invalid_amount": "⚠️ Введите число (0 или больше). Например: {expected}",
+        "pay_delivered_full": "✅ Доставлено. Оплата получена полностью ({amount} сум).",
+        "pay_delivered_auto_discount": "✅ Доставлено.\n💸 Недоплата {shortfall} сум — скидка применена автоматически.",
+        "pay_delivered_discount_pending": "✅ Доставлено.\n💸 Недоплата {shortfall} сум — заявка на скидку отправлена менеджеру на согласование.",
+        "pay_mgr_notify": "💸 Заявка на скидку\nЗаказ: {num}\nСумма: {shortfall} сум\n\nВодитель: {driver}\n\nСогласование — в панели сотрудника.",
     },
     "uz": {
         "hello":          "👋",
@@ -402,6 +422,19 @@ T = {
         "route_delivered": "✅ Yetkazildi.",
         "route_delivered_debt": "✅ Yetkazildi.\n❗ Qarz: {debt} so'm",
         "route_action_error": "⚠️ Bajarib bo'lmadi: {error}",
+
+        # ── Yetkazishda to'lov (3-bosqich, 2-kichik bosqich) ──
+        "pay_ask_method": "💰 Kutilayotgan summa: {expected} so'm\n\nMijoz qanday to'ladi?",
+        "btn_pay_cash": "💵 Naqd",
+        "btn_pay_card": "💳 Karta",
+        "btn_pay_transfer": "🏦 O'tkazma",
+        "btn_pay_none": "🚫 To'lovsiz",
+        "pay_ask_amount": "✏️ Olingan summani kiriting (masalan: {expected}):",
+        "pay_invalid_amount": "⚠️ Son kiriting (0 yoki undan katta). Masalan: {expected}",
+        "pay_delivered_full": "✅ Yetkazildi. To'lov to'liq olindi ({amount} so'm).",
+        "pay_delivered_auto_discount": "✅ Yetkazildi.\n💸 Kam to'lov {shortfall} so'm — chegirma avtomatik qo'llandi.",
+        "pay_delivered_discount_pending": "✅ Yetkazildi.\n💸 Kam to'lov {shortfall} so'm — chegirma so'rovi menejerga yuborildi.",
+        "pay_mgr_notify": "💸 Chegirma so'rovi\nBuyurtma: {num}\nSumma: {shortfall} so'm\n\nHaydovchi: {driver}\n\nTasdiqlash — xodim panelida.",
     },
 }
 
@@ -2095,8 +2128,15 @@ async def drv_take(call: CallbackQuery, company_id: int, state: FSMContext) -> N
         pass
 
 
+def _fmt_sum(v) -> str:
+    return f"{int(round(v)):,}".replace(",", " ")
+
+
 @router.callback_query(F.data.startswith("drv_deliver_"))
 async def drv_deliver(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    """«✅ Доставлено» — сначала спрашиваем способ оплаты (drv_pay_method),
+    сама доставка (_driver_deliver_core) выполняется ПОСЛЕ ввода суммы, см.
+    driver_payment_method/driver_payment_amount ниже."""
     data = await state.get_data()
     lang = data.get("lang", "ru")
     try:
@@ -2109,22 +2149,153 @@ async def drv_deliver(call: CallbackQuery, company_id: int, state: FSMContext) -
         await call.answer(t(lang, "route_no_access"), show_alert=True)
         return
     await call.answer()
-    from main import _driver_deliver_core
     try:
-        result = await _driver_deliver_core(order_id, dict(staff), method="", amount=0, source="бот")
+        expected = await db.get_order_debt_amount(order_id)
     except Exception as e:
-        error = getattr(e, "detail", str(e))
-        await call.message.answer(t(lang, "route_action_error").format(error=_h(error)))
-        return
-    debt = result.get("debt") or 0
-    if debt > 0:
-        await call.message.answer(t(lang, "route_delivered_debt").format(debt=f"{int(debt):,}".replace(",", " ")))
-    else:
-        await call.message.answer(t(lang, "route_delivered"))
+        logging.warning(f"get_order_debt_amount error: {e}")
+        expected = 0
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_pay_cash"), callback_data=f"drv_paym_cash_{order_id}"),
+         InlineKeyboardButton(text=t(lang, "btn_pay_card"), callback_data=f"drv_paym_card_{order_id}")],
+        [InlineKeyboardButton(text=t(lang, "btn_pay_transfer"), callback_data=f"drv_paym_transfer_{order_id}"),
+         InlineKeyboardButton(text=t(lang, "btn_pay_none"), callback_data=f"drv_paym_none_{order_id}")],
+    ])
+    await call.message.answer(t(lang, "pay_ask_method").format(expected=_fmt_sum(expected)), reply_markup=kb)
     try:
         await call.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
+
+
+async def _finish_delivery_with_payment(message: Message, company_id: int, lang: str,
+                                         staff: dict, order_id: int, method: str, amount: float) -> None:
+    """Общий хвост: записать оплату (если есть) → если недоплата — авто-скидка
+    (<1000 сум) или заявка менеджеру → отметить заказ доставленным. Тот же
+    триггер, что handle_payment_amount в старом bot.py (~L3792), которого не
+    хватало в SaaS (см. память project_artez_bot_saas_migration, находка #5)."""
+    try:
+        expected = await db.get_order_debt_amount(order_id)
+    except Exception as e:
+        logging.warning(f"get_order_debt_amount error: {e}")
+        expected = 0
+
+    if amount > 0:
+        try:
+            await db.add_order_payment(order_id, amount, method, "delivery",
+                                        "Оплата при доставке (бот)", _driver_name_bot(staff),
+                                        created_by_staff_id=staff["id"])
+        except Exception as e:
+            logging.warning(f"add_order_payment error: {e}")
+
+    shortfall = max(0.0, expected - amount)
+    AUTO_THRESHOLD = 1000.0
+    if shortfall <= 0:
+        result_text = t(lang, "pay_delivered_full").format(amount=_fmt_sum(amount))
+    elif shortfall < AUTO_THRESHOLD:
+        try:
+            await db.apply_auto_discount(order_id, shortfall, company_id)
+        except Exception as e:
+            logging.warning(f"apply_auto_discount error: {e}")
+        result_text = t(lang, "pay_delivered_auto_discount").format(shortfall=_fmt_sum(shortfall))
+    else:
+        order_num = str(order_id)
+        try:
+            order = await db.get_order_by_id(order_id)
+            order_num = (order or {}).get("order_num") or order_num
+        except Exception as e:
+            logging.warning(f"get_order_by_id error: {e}")
+        try:
+            await db.create_discount_request(order_id, order_num, message.from_user.id, shortfall)
+        except Exception as e:
+            logging.warning(f"create_discount_request error: {e}")
+        result_text = t(lang, "pay_delivered_discount_pending").format(shortfall=_fmt_sum(shortfall))
+        try:
+            managers = await db.get_managers_with_push(company_id)
+        except Exception as e:
+            logging.warning(f"get_managers_with_push error: {e}")
+            managers = []
+        mgr_text = t(lang, "pay_mgr_notify").format(
+            num=_h(order_num), shortfall=_fmt_sum(shortfall), driver=_h(_driver_name_bot(staff)))
+        for mgr in managers:
+            try:
+                await message.bot.send_message(int(mgr["tg_id"]), mgr_text)
+            except Exception as e:
+                logging.warning(f"discount notify mgr {mgr.get('id')}: {e}")
+
+    from main import _driver_deliver_core
+    try:
+        await _driver_deliver_core(order_id, staff, method="", amount=0, source="бот")
+    except Exception as e:
+        error = getattr(e, "detail", str(e))
+        result_text += "\n" + t(lang, "route_action_error").format(error=_h(error))
+    await message.answer(result_text)
+
+
+def _driver_name_bot(staff: dict) -> str:
+    return " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "Водитель")
+
+
+@router.callback_query(F.data.startswith("drv_paym_"))
+async def driver_payment_method(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    try:
+        rest = call.data.replace("drv_paym_", "")
+        method, order_id_str = rest.rsplit("_", 1)
+        order_id = int(order_id_str)
+    except ValueError:
+        await call.answer()
+        return
+    staff = await db.get_staff_by_tg_id_and_company(call.from_user.id, company_id)
+    if not staff or not _can_drive_bot(staff):
+        await call.answer(t(lang, "route_no_access"), show_alert=True)
+        return
+    await call.answer()
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    if method == "none":
+        await _finish_delivery_with_payment(call.message, company_id, lang, dict(staff), order_id, "", 0.0)
+        return
+
+    try:
+        expected = await db.get_order_debt_amount(order_id)
+    except Exception as e:
+        logging.warning(f"get_order_debt_amount error: {e}")
+        expected = 0
+    await state.set_state(DriverPaymentForm.waiting_amount)
+    await state.update_data(lang=lang, pay_order_id=order_id, pay_method=method)
+    await call.message.answer(t(lang, "pay_ask_amount").format(expected=_fmt_sum(expected)))
+
+
+@router.message(DriverPaymentForm.waiting_amount, F.text)
+async def driver_payment_amount(message: Message, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    order_id = data.get("pay_order_id")
+    method = data.get("pay_method", "")
+    raw = (message.text or "").strip().replace(" ", "").replace("\xa0", "").replace(",", ".")
+    try:
+        amount = float(raw)
+        if amount < 0:
+            raise ValueError
+    except ValueError:
+        try:
+            expected = await db.get_order_debt_amount(order_id)
+        except Exception:
+            expected = 0
+        await message.answer(t(lang, "pay_invalid_amount").format(expected=_fmt_sum(expected)))
+        return
+
+    staff = await db.get_staff_by_tg_id_and_company(message.from_user.id, company_id)
+    await state.clear()
+    await state.update_data(lang=lang)
+    if not staff or not _can_drive_bot(staff) or order_id is None:
+        await message.answer(t(lang, "route_no_access"))
+        return
+    await _finish_delivery_with_payment(message, company_id, lang, dict(staff), int(order_id), method, amount)
 
 
 # ══════════════════════════════════════
