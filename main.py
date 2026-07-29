@@ -7094,8 +7094,11 @@ async def get_my_route(staff=Depends(get_current_staff)):
         logging.warning(f"payment_events: {_pe}")
     return {"ok": True, "routes": routes, "payment_events": payment_events}
 
-@app.post("/api/staff/my-route/stops/{order_id}/take-delivery")
-async def driver_take_delivery(order_id: int, staff=Depends(get_current_staff)):
+async def _driver_take_delivery_core(order_id: int, staff: dict, source: str = "web") -> dict:
+    """Общая логика «Взял для доставки» — вынесена, чтобы SaaS-бот заказов
+    (order_bot_handlers.py, тот же процесс) могла вызывать её напрямую с уже
+    резолвленным staff (через get_staff_by_tg_id_and_company), без HTTP-петли
+    на себя же (тот же паттерн, что _agent_status_for_bot/_agent_apply_for_bot)."""
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
     name = _driver_name(staff)
     async with db.pool.acquire() as conn:
@@ -7108,10 +7111,14 @@ async def driver_take_delivery(order_id: int, staff=Depends(get_current_staff)):
             await conn.execute("UPDATE orders SET status='delivery', updated_at=NOW() WHERE id=$1", order_id)
             await conn.execute(
                 "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
-                order_id, staff["id"], name, "status_delivery", "Маршрут (web): забрал для доставки клиенту")
+                order_id, staff["id"], name, "status_delivery", f"Маршрут ({source}): забрал для доставки клиенту")
         await conn.execute("UPDATE route_orders SET driver_confirmed=TRUE WHERE order_id=$1", order_id)
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True}
+
+@app.post("/api/staff/my-route/stops/{order_id}/take-delivery")
+async def driver_take_delivery(order_id: int, staff=Depends(get_current_staff)):
+    return await _driver_take_delivery_core(order_id, staff)
 
 @app.post("/api/staff/my-route/stops/{order_id}/undo-delivered")
 async def driver_undo_delivered(order_id: int, staff=Depends(get_current_staff)):
@@ -7175,13 +7182,8 @@ async def driver_returned(order_id: int, reason_index: int = Body(..., embed=Tru
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True}
 
-@app.post("/api/staff/my-route/stops/{order_id}/deliver")
-async def driver_deliver(
-    order_id: int,
-    method: str = Body(..., embed=True),
-    amount: float = Body(0, embed=True),
-    staff=Depends(get_current_staff)
-):
+async def _driver_deliver_core(order_id: int, staff: dict, method: str = "", amount: float = 0, source: str = "web") -> dict:
+    """Общая логика «Доставлено» (опционально с оплатой) — см. _driver_take_delivery_core."""
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
     name = _driver_name(staff)
     async with db.pool.acquire() as conn:
@@ -7191,10 +7193,10 @@ async def driver_deliver(
             raise HTTPException(400, f"Статус: {row['status']}")
     if amount > 0 and method in ("cash","card","transfer"):
         await db.add_order_payment(order_id, amount, method, "delivery",
-                                   "Оплата при доставке (web)", name,
+                                   f"Оплата при доставке ({source})", name,
                                    created_by_staff_id=staff["id"])
     debt = await db.get_order_debt_amount(order_id)
-    note = f"Маршрут (web): доставлен клиенту{f', долг {debt:.0f} сум' if debt > 0 else ''}"
+    note = f"Маршрут ({source}): доставлен клиенту{f', долг {debt:.0f} сум' if debt > 0 else ''}"
     async with db.pool.acquire() as conn:
         await conn.execute(
             "UPDATE orders SET status='delivered', updated_at=NOW() WHERE id=$1", order_id)
@@ -7205,6 +7207,15 @@ async def driver_deliver(
             order_id, staff["id"], name, "status_delivered", note)
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True, "debt": float(debt)}
+
+@app.post("/api/staff/my-route/stops/{order_id}/deliver")
+async def driver_deliver(
+    order_id: int,
+    method: str = Body(..., embed=True),
+    amount: float = Body(0, embed=True),
+    staff=Depends(get_current_staff)
+):
+    return await _driver_deliver_core(order_id, staff, method, amount)
 
 @app.post("/api/staff/my-route/stops/{order_id}/close-with-debt")
 async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)):

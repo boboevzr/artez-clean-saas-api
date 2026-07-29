@@ -50,7 +50,7 @@ import logging
 import re
 
 from aiogram import Router, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -273,6 +273,18 @@ T = {
         "agent_failed":   "❌ Не удалось проверить/зарегистрировать. Попробуйте позже или через сайт компании.",
         "btn_open_agent_cabinet": "🎯 Открыть кабинет агента",
         "btn_register_site": "🌐 Зарегистрироваться",
+
+        # ── Маршрут водителя (/route) ──
+        "route_no_access": "❌ Доступно только водителям компании.",
+        "route_empty": "🚚 На сегодня маршрутов нет.",
+        "route_header": "🚚 Маршрут на сегодня: {count} точ(ка/ки/ек)",
+        "route_stop_line": "📋 {num}\n👤 {client}\n📞 {phone}\n📍 {address}\n📦 {items} поз.",
+        "btn_route_take": "🚚 Взял",
+        "btn_route_deliver": "✅ Доставлено",
+        "route_taken": "🚚 Взял для доставки.",
+        "route_delivered": "✅ Доставлено.",
+        "route_delivered_debt": "✅ Доставлено.\n❗ Долг: {debt} сум",
+        "route_action_error": "⚠️ Не удалось выполнить: {error}",
     },
     "uz": {
         "hello":          "👋",
@@ -378,6 +390,18 @@ T = {
         "agent_failed":   "❌ Tekshirib/ro'yxatdan o'tkazib bo'lmadi. Keyinroq yoki kompaniya sayti orqali urinib ko'ring.",
         "btn_open_agent_cabinet": "🎯 Agent kabinetini ochish",
         "btn_register_site": "🌐 Ro'yxatdan o'tish",
+
+        # ── Haydovchi marshruti (/route) ──
+        "route_no_access": "❌ Faqat kompaniya haydovchilari uchun.",
+        "route_empty": "🚚 Bugunga marshrutlar yo'q.",
+        "route_header": "🚚 Bugungi marshrut: {count} ta nuqta",
+        "route_stop_line": "📋 {num}\n👤 {client}\n📞 {phone}\n📍 {address}\n📦 {items} dona",
+        "btn_route_take": "🚚 Oldim",
+        "btn_route_deliver": "✅ Yetkazildi",
+        "route_taken": "🚚 Yetkazish uchun oldim.",
+        "route_delivered": "✅ Yetkazildi.",
+        "route_delivered_debt": "✅ Yetkazildi.\n❗ Qarz: {debt} so'm",
+        "route_action_error": "⚠️ Bajarib bo'lmadi: {error}",
     },
 }
 
@@ -1973,6 +1997,134 @@ async def cb_take_lead(call: CallbackQuery, company_id: int) -> None:
             pass
     else:
         await call.answer("Ошибка сервера. Попробуйте ещё раз.", show_alert=True)
+
+
+# ══════════════════════════════════════
+#  МАРШРУТ ВОДИТЕЛЯ — этап 3 (первый под-этап: только просмотр + «Взял»/
+#  «Доставлено», БЕЗ приёма оплаты — оплата/долг/скидка отдельным под-этапом,
+#  см. память project_artez_bot_saas_migration). Личный чат бот↔водитель (НЕ
+#  группа компании — водитель не должен видеть чужие заказы).
+#
+#  Переиспользует ТУ ЖЕ бизнес-логику, что и web (`staff.html` → «Доставка»):
+#  _driver_take_delivery_core/_driver_deliver_core вынесены в main.py из
+#  /api/staff/my-route/stops/{id}/take-delivery и .../deliver (тот же паттерн,
+#  что _agent_status_for_bot/_agent_apply_for_bot — прямой вызов в процессе,
+#  без HTTP-петли на себя же). db.get_routes_today ТЕПЕРЬ требует company_id
+#  (см. security-фикс 2026-07-29 — раньше отдавала маршруты ВСЕХ компаний).
+# ══════════════════════════════════════
+def _can_drive_bot(staff: dict) -> bool:
+    return bool(staff.get("can_drive")) or staff.get("role") == "driver"
+
+
+async def _format_route_stop(lang: str, stop: dict) -> str:
+    client = " ".join(filter(None, [stop.get("client_first_name"), stop.get("client_last_name")])) or "—"
+    return t(lang, "route_stop_line").format(
+        num=_h(stop.get("order_num") or stop["order_id"]),
+        client=_h(client),
+        phone=_h(stop.get("client_phone") or "—"),
+        address=_h(stop.get("short_address") or stop.get("address") or "—"),
+        items=stop.get("item_count", 0),
+    )
+
+
+def _route_stop_kb(lang: str, order_id: int, order_status: str, stop_status: str) -> InlineKeyboardMarkup | None:
+    rows = []
+    if order_status == "ready":
+        rows.append([InlineKeyboardButton(text=t(lang, "btn_route_take"), callback_data=f"drv_take_{order_id}")])
+    if stop_status != "done" and order_status in ("ready", "delivery"):
+        rows.append([InlineKeyboardButton(text=t(lang, "btn_route_deliver"), callback_data=f"drv_deliver_{order_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+async def _show_route(message: Message, lang: str, company_id: int, staff: dict) -> None:
+    try:
+        routes = await db.get_routes_today(company_id, staff.get("branch"))
+    except Exception as e:
+        logging.warning(f"get_routes_today error: {e}")
+        routes = []
+    stops = [s for r in routes for s in r.get("stops", [])]
+    if not stops:
+        await message.answer(t(lang, "route_empty"))
+        return
+    await message.answer(t(lang, "route_header").format(count=len(stops)))
+    for stop in stops:
+        text = await _format_route_stop(lang, stop)
+        kb = _route_stop_kb(lang, stop["order_id"], stop.get("order_status"), stop.get("stop_status"))
+        await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("route"))
+async def cmd_route(message: Message, company_id: int, state: FSMContext) -> None:
+    lang = await _resolve_lang(message.from_user.id, company_id, state) or "ru"
+    try:
+        staff = await db.get_staff_by_tg_id_and_company(message.from_user.id, company_id)
+    except Exception as e:
+        logging.warning(f"get_staff_by_tg_id_and_company error: {e}")
+        staff = None
+    if not staff or not _can_drive_bot(staff):
+        await message.answer(t(lang, "route_no_access"))
+        return
+    await _show_route(message, lang, company_id, dict(staff))
+
+
+@router.callback_query(F.data.startswith("drv_take_"))
+async def drv_take(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    try:
+        order_id = int(call.data.replace("drv_take_", ""))
+    except ValueError:
+        await call.answer()
+        return
+    staff = await db.get_staff_by_tg_id_and_company(call.from_user.id, company_id)
+    if not staff or not _can_drive_bot(staff):
+        await call.answer(t(lang, "route_no_access"), show_alert=True)
+        return
+    await call.answer()
+    from main import _driver_take_delivery_core
+    try:
+        await _driver_take_delivery_core(order_id, dict(staff), source="бот")
+    except Exception as e:
+        error = getattr(e, "detail", str(e))
+        await call.message.answer(t(lang, "route_action_error").format(error=_h(error)))
+        return
+    await call.message.answer(t(lang, "route_taken"))
+    try:
+        await call.message.edit_reply_markup(reply_markup=_route_stop_kb(lang, order_id, "delivery", "pending"))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("drv_deliver_"))
+async def drv_deliver(call: CallbackQuery, company_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    try:
+        order_id = int(call.data.replace("drv_deliver_", ""))
+    except ValueError:
+        await call.answer()
+        return
+    staff = await db.get_staff_by_tg_id_and_company(call.from_user.id, company_id)
+    if not staff or not _can_drive_bot(staff):
+        await call.answer(t(lang, "route_no_access"), show_alert=True)
+        return
+    await call.answer()
+    from main import _driver_deliver_core
+    try:
+        result = await _driver_deliver_core(order_id, dict(staff), method="", amount=0, source="бот")
+    except Exception as e:
+        error = getattr(e, "detail", str(e))
+        await call.message.answer(t(lang, "route_action_error").format(error=_h(error)))
+        return
+    debt = result.get("debt") or 0
+    if debt > 0:
+        await call.message.answer(t(lang, "route_delivered_debt").format(debt=f"{int(debt):,}".replace(",", " ")))
+    else:
+        await call.message.answer(t(lang, "route_delivered"))
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════
