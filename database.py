@@ -5100,6 +5100,34 @@ async def create_empty_items(order_id: int, count: int) -> list:
                 result.append(dict(row))
     return result
 
+async def create_empty_items_by_service(order_id: int, service_counts: dict) -> list:
+    """Как create_empty_items, но с разбивкой по услугам (по N позиций на каждую)."""
+    if not pool: return []
+    result = []
+    async with pool.acquire() as conn:
+        for service, count in service_counts.items():
+            for _ in range(int(count or 0)):
+                row = await conn.fetchrow("""
+                    INSERT INTO order_items (order_id, service, sqm, price_per_sqm)
+                    VALUES ($1, $2, 0, 0) RETURNING *
+                """, order_id, service)
+                if row:
+                    result.append(dict(row))
+    return result
+
+async def get_order_by_phone_pending(phone: str) -> dict | None:
+    """Ищет заказ клиента по телефону в статусе 'new'/'confirmed' (ещё не забран водителем),
+    своей компании (_cid()) — для флоу «Забор»: определить, создан ли уже заказ менеджером."""
+    if not pool: return None
+    cid = _cid()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT * FROM orders
+            WHERE client_phone=$1 AND company_id=$2 AND status IN ('new','confirmed')
+            ORDER BY created_at DESC LIMIT 1
+        """, phone, cid)
+        return dict(row) if row else None
+
 async def update_order_item(item_id: int, **kwargs) -> dict:
     if not pool: return {}
     allowed = {"service", "width_cm", "length_cm", "sqm", "price_per_sqm"}
@@ -5319,6 +5347,38 @@ async def seed_company_tg_messages(company_id: int, force: bool = False):
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (status, company_id) DO NOTHING
         """, [(s, e, ru, uz, company_id) for s, e, ru, uz in source])
+
+
+_SMS_TEMPLATE_DEFAULTS = {
+    "sms_text_register":       "Kod podtverzhdeniya: {code}",
+    "sms_text_login":          "Kod podtverzhdeniya dlya vhoda: {code}",
+    "sms_text_reset":          "Kod vosstanovleniya parolya: {code}",
+    "sms_pickup_enabled":      "false",
+    "sms_pickup_template_ru":  "Zakaz {order_num} prinyat kurerom ({count} poz.). Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
+    "sms_pickup_template_uz":  "{order_num} buyurtma kuryer tomonidan qabul qilindi ({count} dona). Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
+}
+
+async def seed_company_sms_templates(company_id: int, force: bool = False):
+    """Копирует SMS-шаблоны из company_id=0 (заполняет суперадмин) в company_id —
+    по ключам (ON CONFLICT DO NOTHING), а не всё-или-ничего: у новой компании заполнит
+    все 6 ключей, у уже существующей — только те, что ещё не заданы (например, новый
+    ключ sms_pickup_* добавили позже — старые компании получат только его).
+    force=True — сначала стирает текущие значения компании и переписывает из шаблона."""
+    if not pool: return
+    keys = list(_SMS_TEMPLATE_DEFAULTS.keys())
+    async with pool.acquire() as conn:
+        if force:
+            await conn.execute(
+                "DELETE FROM config WHERE company_id=$1 AND key = ANY($2::text[])",
+                company_id, keys)
+        template = {r["key"]: r["value"] for r in await conn.fetch(
+            "SELECT key, value FROM config WHERE company_id=0 AND key = ANY($1::text[])", keys)}
+        for key, default_val in _SMS_TEMPLATE_DEFAULTS.items():
+            val = template.get(key) or default_val
+            await conn.execute("""
+                INSERT INTO config (key, value, company_id, updated_at) VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (company_id, key) DO NOTHING
+            """, key, val, company_id)
 
 
 async def get_client_by_tg_phone(tg_phone: str, company_id: int = 1) -> dict | None:
@@ -9060,6 +9120,11 @@ async def create_company(name: str, slug: str, secret_key: str,
             """, name, slug, secret_key, plan, max_branches, max_staff)
         except Exception:
             return None  # slug уже занят
+
+async def get_company_slug(company_id: int) -> str:
+    if not pool: return ""
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT slug FROM companies WHERE id=$1", company_id) or ""
 
 async def update_company(company_id: int, updates: dict) -> bool:
     """Возвращает False только при конфликте уникального slug — остальные ошибки пробрасываются."""

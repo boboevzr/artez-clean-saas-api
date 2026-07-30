@@ -828,6 +828,9 @@ class StaffOrderRequest(BaseModel):
     note: str = ""
     pickup_date: str = ""
     pickup_time: str = ""
+    item_count: int = 0
+    items: dict[str, int] = {}
+    sms_lang: str = "ru"
 
 
 # ══════════════════════════════════════
@@ -875,20 +878,20 @@ async def _eskiz_get_token() -> str:
     return _eskiz_token
 
 
-async def send_sms(phone: str, message: str):
-    """Отправляет SMS через Eskiz.uz. Если ключи не заданы — пишет в лог."""
+async def send_sms(phone: str, message: str) -> bool:
+    """Отправляет SMS через Eskiz.uz. Если ключи не заданы — пишет в лог. Возвращает True/False (доставлен ли запрос в Eskiz)."""
     logging.info(f"📲 [SMS->{phone}] {message}")
 
     email    = await _get_cfg("eskiz_email")
     password = await _get_cfg("eskiz_password")
     if not email or not password:
         logging.warning("⚠️ eskiz_email/eskiz_password не заданы — SMS не отправлен")
-        return
+        return False
 
     token = await _eskiz_get_token()
     if not token:
         logging.error("❌ Eskiz: не удалось получить токен")
-        return
+        return False
 
     mobile = phone.lstrip("+")  # Eskiz принимает без «+»
 
@@ -901,9 +904,48 @@ async def send_sms(phone: str, message: str):
         if resp.status == 200:
             data = await resp.json()
             logging.info(f"✅ Eskiz SMS отправлен: {data}")
+            return True
         else:
             body = await resp.text()
             logging.error(f"❌ Eskiz SMS error: {resp.status} {body}")
+            return False
+
+
+async def _render_pickup_sms(lang: str, order_num: str, count: int, company_id: int) -> str:
+    lang = lang if lang in ("ru", "uz") else "ru"
+    tpl = await _get_cfg(f"sms_pickup_template_{lang}") or await _get_cfg("sms_pickup_template_ru")
+    contact_short = await _get_cfg("contact_short")
+    contact_main  = await _get_cfg("contact_main")
+    phones = ", ".join(p for p in (contact_short, contact_main) if p)
+    order_bot_username = await _get_cfg("order_bot_username")
+    bot_link = f"t.me/{order_bot_username}" if order_bot_username else ""
+    slug = await db.get_company_slug(company_id)
+    site_link = f"cleano.uz/?c={slug}" if slug else "cleano.uz"
+    return (tpl.replace("{order_num}", str(order_num))
+               .replace("{count}", str(count))
+               .replace("{phones}", phones)
+               .replace("{bot_link}", bot_link)
+               .replace("{site_link}", site_link))
+
+
+async def _send_pickup_sms(order_id: int, phone: str, order_num: str, count: int, lang: str,
+                            company_id: int, staff_id: int, staff_name: str):
+    """Fire-and-forget: рендерит и шлёт клиенту SMS о заборе вещей водителем, логирует
+    результат в order_activity (используется уже существующей панелью «История» карточки
+    заказа — без отдельной таблицы/эндпоинта под историю SMS)."""
+    lang = lang if lang in ("ru", "uz") else "ru"
+    if (await _get_cfg("sms_pickup_enabled")) != "true":
+        return
+    if not phone:
+        return
+    text = await _render_pickup_sms(lang, order_num, count, company_id)
+    ok = await send_sms(phone, text)
+    prefix = "✅ Отправлен" if ok else "❌ Не отправлен"
+    try:
+        await db.add_order_activity(order_id, staff_id, staff_name, "sms_sent" if ok else "sms_failed",
+                                     f"{prefix} SMS ({lang.upper()}) на {phone}: {text[:150]}")
+    except Exception as e:
+        logging.warning(f"_send_pickup_sms activity log failed order={order_id}: {e}")
 
 
 def generate_code() -> str:
@@ -1600,11 +1642,24 @@ _ORDER_STATUS_RU = {
     "delivered": "Доставлен", "cancelled": "Отменён",
 }
 
-def _route_pickup_kb(order_id: int, status: str) -> dict:
+async def _is_route_closed_for_order(order_id: int) -> bool:
+    """True, если маршрут, к которому привязан заказ, уже закрыт (status='done') —
+    тогда кнопки действий в канале водителей нужно спрятать, оставив только инфо-ряд."""
+    if not db.pool: return False
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchval("""
+            SELECT r.status FROM route_orders ro JOIN routes r ON r.id=ro.route_id
+            WHERE ro.order_id=$1 ORDER BY r.id DESC LIMIT 1
+        """, order_id)
+        return row == "done"
+
+def _route_pickup_kb(order_id: int, status: str, closed: bool = False) -> dict:
     """Inline-клавиатура для сообщения в канале водителей."""
     h = {"text": "📋 История", "callback_data": f"rp:{order_id}:history"}
     r = {"text": "🔄 Обновить", "callback_data": f"rp:{order_id}:refresh"}
     p = {"text": "📦 Позиции", "callback_data": f"rp:{order_id}:items"}
+    if closed:
+        return {"inline_keyboard": [[p, h, r]]}
     if status == "confirmed":
         return {"inline_keyboard": [
             [{"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"},
@@ -1803,7 +1858,7 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
             kb_status = "ready"  # ещё не подтвердил «Везу клиенту»
         else:
             kb_status = status
-        kb       = _route_pickup_kb(order_id, kb_status)
+        kb       = _route_pickup_kb(order_id, kb_status, closed=route.get("status") == "done")
         msg_id   = await _send_tg_with_kb(dest, text, kb, silent=True, protect=True)
         if msg_id:
             sent += 1
@@ -2552,6 +2607,17 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             source="staff",
         )
         await db.refresh_crm_client_stats(req.phone)
+        if req.items or req.item_count:
+            async with db.pool.acquire() as conn:
+                _row = await conn.fetchrow("SELECT id FROM orders WHERE order_num=$1 AND company_id=$2",
+                                            order_num, staff["company_id"])
+            if _row:
+                if req.items:
+                    created = await db.create_empty_items_by_service(_row["id"], req.items)
+                else:
+                    created = await db.create_empty_items(_row["id"], max(0, req.item_count))
+                asyncio.create_task(_send_pickup_sms(_row["id"], req.phone, order_num, len(created),
+                                                      req.sms_lang, staff["company_id"], staff["id"], staff_label))
         return {"ok": True, "order_num": order_num}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка: {type(e).__name__}: {e}")
@@ -4455,7 +4521,7 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             ch_id_str = await _get_cfg(ch_key)
             logging.info(f"[channel_kb] ch_key={ch_key} ch_id={ch_id_str!r}")
             if ch_id_str:
-                new_kb = _route_pickup_kb(order_id, status)
+                new_kb = _route_pickup_kb(order_id, status, closed=await _is_route_closed_for_order(order_id))
                 async with aiohttp.ClientSession() as _sess:
                     resp = await _sess.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup",
@@ -5206,7 +5272,7 @@ async def tg_webhook(request: Request):
             await db.update_order_status(order_id, new_status)
 
             # Обновить клавиатуру сообщения
-            new_kb = _route_pickup_kb(order_id, new_status)
+            new_kb = _route_pickup_kb(order_id, new_status, closed=await _is_route_closed_for_order(order_id))
             # Обновить текст: поменять строку статуса
             new_text = orig_text
             for old_s, new_s in _ORDER_STATUS_RU.items():
@@ -5726,7 +5792,7 @@ async def _update_api_channel_stop(order_id: int):
         num = (info.get("sort_order") or 1)
         new_text = _build_stop_text_short(info, num)
         status = info.get("status", "delivery")
-        new_kb = _route_pickup_kb(order_id, status)
+        new_kb = _route_pickup_kb(order_id, status, closed=await _is_route_closed_for_order(order_id))
         async with aiohttp.ClientSession() as _sess:
             resp = await _sess.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
@@ -7094,6 +7160,95 @@ async def get_my_route(staff=Depends(get_current_staff)):
         logging.warning(f"payment_events: {_pe}")
     return {"ok": True, "routes": routes, "payment_events": payment_events}
 
+# ── Забор у клиента (pickup) ────────────────────────────────────────────────
+
+@app.get("/api/staff/pickup/lookup")
+async def staff_pickup_lookup(phone: str, staff=Depends(get_current_staff)):
+    """Проверка по телефону: есть ли уже заказ в статусе new/confirmed (создан
+    менеджером/колл-центром) — решает, открыть найденный заказ или дать создать новый."""
+    if not _can_drive(staff):
+        raise HTTPException(403, "Нет доступа")
+    normalized = normalize_phone(phone)
+    order = await db.get_order_by_phone_pending(normalized)
+    if not order:
+        return {"ok": True, "found": False}
+    return {"ok": True, "found": True, "order": order}
+
+
+class PickupTakeRequest(BaseModel):
+    mode: str = "count"       # "count" | "by_service"
+    count: int = 0
+    items: dict[str, int] = {}
+    sms_lang: str = "ru"
+
+@app.post("/api/staff/pickup/{order_id}/take")
+async def staff_pickup_take(order_id: int, req: PickupTakeRequest, staff=Depends(get_current_staff)):
+    """Водитель забрал вещи у клиента: создаёт пустые позиции (общим счётом или по
+    услугам), переводит заказ в 'pickup', шлёт клиенту SMS (если включено)."""
+    if not _can_drive(staff):
+        raise HTTPException(403, "Нет доступа")
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    if order.get("status") not in ("new", "confirmed"):
+        raise HTTPException(400, f"Заказ уже в статусе: {order.get('status')}")
+    name = _driver_name(staff)
+    if req.mode == "by_service" and req.items:
+        created = await db.create_empty_items_by_service(order_id, req.items)
+    else:
+        created = await db.create_empty_items(order_id, max(0, req.count))
+    await db.update_order_status(order_id, "pickup", note=f"Забор ({name}): {len(created)} поз.")
+    asyncio.create_task(_send_pickup_sms(order_id, order.get("client_phone"), order.get("order_num"),
+                                          len(created), req.sms_lang, staff["company_id"], staff["id"], name))
+    return {"ok": True, "items": created}
+
+
+@app.post("/api/staff/pickup/{order_id}/handoff")
+async def staff_pickup_handoff(order_id: int, staff=Depends(get_current_staff)):
+    """Сдал забранные вещи в мастерскую."""
+    if not _can_drive(staff):
+        raise HTTPException(403, "Нет доступа")
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    if order.get("status") != "pickup":
+        raise HTTPException(400, f"Заказ уже в статусе: {order.get('status')}")
+    name = _driver_name(staff)
+    await db.update_order_status(order_id, "received", note=f"Забор ({name}): сдал в мастерскую")
+    return {"ok": True}
+
+
+@app.post("/api/staff/pickup/{order_id}/not-taken")
+async def staff_pickup_not_taken(order_id: int, reason: str = Body("", embed=True),
+                                  staff=Depends(get_current_staff)):
+    """Не забрал (клиента нет дома и т.д.) — без смены статуса, только отметка в истории."""
+    if not _can_drive(staff):
+        raise HTTPException(403, "Нет доступа")
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    name = _driver_name(staff)
+    await db.add_order_activity(order_id, staff["id"], name, "pickup_not_taken", reason or "Не забрал")
+    return {"ok": True}
+
+
+class ManualSmsRequest(BaseModel):
+    lang: str = "ru"
+
+@app.post("/api/admin/orders/{order_id}/send-sms")
+async def admin_send_pickup_sms(order_id: int, req: ManualSmsRequest,
+                                 staff=Depends(require_perm("orders"))):
+    """Ручная/повторная отправка SMS о заборе — кнопка «📲 SMS» в карточке заказа."""
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    items = await db.get_order_items(order_id)
+    name = _driver_name(staff) if staff.get("role") == "driver" else (staff.get("first_name") or staff.get("login", "Сотрудник"))
+    await _send_pickup_sms(order_id, order.get("client_phone"), order.get("order_num"),
+                            len(items), req.lang, staff["company_id"], staff["id"], name)
+    return {"ok": True}
+
+
 async def _driver_take_delivery_core(order_id: int, staff: dict, source: str = "web") -> dict:
     """Общая логика «Взял для доставки» — вынесена, чтобы SaaS-бот заказов
     (order_bot_handlers.py, тот же процесс) могла вызывать её напрямую с уже
@@ -7598,7 +7753,7 @@ async def reject_debt_approval_ep(
                     ch_info = await db.get_order_channel_info(order_id)
                     if ch_info and ch_info.get("channel_id") and ch_info.get("msg_id"):
                         new_text = _fmt_stop_text_api(ch_info, ch_info["stop_num"])
-                        kb = _route_pickup_kb(order_id, "delivery")
+                        kb = _route_pickup_kb(order_id, "delivery", closed=await _is_route_closed_for_order(order_id))
                         await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
                                      json={"chat_id": ch_info["channel_id"], "message_id": ch_info["msg_id"],
                                            "text": new_text, "parse_mode": "HTML",
@@ -7688,6 +7843,9 @@ SITE_SETTINGS_DEFAULTS = {
     "sms_text_register":   "Kod podtverzhdeniya: {code}",
     "sms_text_login":      "Kod podtverzhdeniya dlya vhoda: {code}",
     "sms_text_reset":      "Kod vosstanovleniya parolya: {code}",
+    "sms_pickup_enabled":       "false",
+    "sms_pickup_template_ru":   "Zakaz {order_num} prinyat kurerom ({count} poz.). Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
+    "sms_pickup_template_uz":   "{order_num} buyurtma kuryer tomonidan qabul qilindi ({count} dona). Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
     # Google Sheets
     "sheets_url":          "",
     # Группа уведомлений
@@ -7819,6 +7977,9 @@ class SiteSettings(BaseModel):
     sms_text_register:   str | None = None
     sms_text_login:      str | None = None
     sms_text_reset:      str | None = None
+    sms_pickup_enabled:      str | None = None
+    sms_pickup_template_ru:  str | None = None
+    sms_pickup_template_uz:  str | None = None
     sheets_url:          str | None = None
     leads_group_id:          str | None = None
     leads_group_zarafshan:   str | None = None
@@ -10179,6 +10340,7 @@ async def _provision_company(name: str, slug: str, plan: str, max_branches: int,
     await db.seed_company_site_reviews(company["id"], city_ru=city_ru, city_uz=city_uz)
     await db.seed_company_site_faq(company["id"])
     await db.seed_company_defaults(company["id"], name)
+    await db.seed_company_sms_templates(company["id"])
 
     # Мастер-пароль для подтверждения опасных действий — свой уникальный на компанию,
     # а не общий ADMIN_PASS по умолчанию для всех.
@@ -12068,6 +12230,45 @@ async def saas_update_support_contact(req: SupportContactRequest, _=Depends(get_
     await db.set_config_for_company("saas_support_tg", req.telegram, 0)
     await db.set_config_for_company("saas_support_phone", req.phone, 0)
     return {"ok": True}
+
+
+_SMS_TEMPLATE_KEYS = ["sms_text_register", "sms_text_login", "sms_text_reset",
+                      "sms_pickup_enabled", "sms_pickup_template_ru", "sms_pickup_template_uz"]
+
+@app.get("/api/saas/catalog/sms-templates")
+async def saas_get_sms_templates(_=Depends(get_superadmin)):
+    """Шаблон SMS-текстов (company_id=0) — копируется в новые компании при создании."""
+    result = {}
+    for key in _SMS_TEMPLATE_KEYS:
+        val = await db.get_config_for_company(key, 0)
+        result[key] = val if val else SITE_SETTINGS_DEFAULTS.get(key, "")
+    return {"ok": True, "templates": result}
+
+
+class SmsTemplatesRequest(BaseModel):
+    sms_text_register:      str | None = None
+    sms_text_login:         str | None = None
+    sms_text_reset:         str | None = None
+    sms_pickup_enabled:     str | None = None
+    sms_pickup_template_ru: str | None = None
+    sms_pickup_template_uz: str | None = None
+
+@app.put("/api/saas/catalog/sms-templates")
+async def saas_save_sms_templates(body: SmsTemplatesRequest, _=Depends(get_superadmin)):
+    data = {k: v for k, v in body.dict().items() if v is not None}
+    for key, val in data.items():
+        await db.set_config_for_company(key, val, 0)
+    return {"ok": True}
+
+
+@app.post("/api/saas/catalog/sms-templates/seed-to-companies")
+async def saas_reseed_sms_templates(_=Depends(get_superadmin)):
+    """Принудительно засеять недостающие ключи SMS-шаблонов во ВСЕХ компаниях
+    (для уже созданных компаний, у которых их ещё нет — новые ключи типа sms_pickup_*)."""
+    companies = await db.get_all_companies()
+    for c in companies:
+        await db.seed_company_sms_templates(c["id"])
+    return {"ok": True, "companies": len(companies)}
 
 
 _ROLE_PERMS_DEFAULT = {
