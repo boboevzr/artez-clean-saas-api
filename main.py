@@ -911,9 +911,19 @@ async def send_sms(phone: str, message: str) -> bool:
             return False
 
 
-async def _render_pickup_sms(lang: str, order_num: str, count: int, company_id: int) -> str:
+def _order_num_short(order_num: str) -> str:
+    """'ARTEZ-1120' -> '#1120' — компактный номер для SMS клиенту (Eskiz-шаблоны настраиваются
+    отправителем под ЭТОТ формат, см. запрос пользователя 2026-07-30)."""
+    if not order_num:
+        return ""
+    tail = str(order_num).rsplit("-", 1)[-1]
+    return f"#{tail}"
+
+_SMS_KIND_LABEL = {"pickup": "📲 SMS (забор)", "ready": "📲 SMS (готово)"}
+
+async def _render_sms_notification(kind: str, lang: str, order_num: str, count: int, company_id: int) -> str:
     lang = lang if lang in ("ru", "uz") else "ru"
-    tpl = await _get_cfg(f"sms_pickup_template_{lang}") or await _get_cfg("sms_pickup_template_ru")
+    tpl = await _get_cfg(f"sms_{kind}_template_{lang}") or await _get_cfg(f"sms_{kind}_template_ru")
     contact_short = await _get_cfg("contact_short")
     contact_main  = await _get_cfg("contact_main")
     phones = ", ".join(p for p in (contact_short, contact_main) if p)
@@ -921,31 +931,36 @@ async def _render_pickup_sms(lang: str, order_num: str, count: int, company_id: 
     bot_link = f"t.me/{order_bot_username}" if order_bot_username else ""
     slug = await db.get_company_slug(company_id)
     site_link = f"cleano.uz/?c={slug}" if slug else "cleano.uz"
-    return (tpl.replace("{order_num}", str(order_num))
+    return (tpl.replace("{order_num}", _order_num_short(order_num))
                .replace("{count}", str(count))
                .replace("{phones}", phones)
                .replace("{bot_link}", bot_link)
                .replace("{site_link}", site_link))
 
 
-async def _send_pickup_sms(order_id: int, phone: str, order_num: str, count: int, lang: str,
-                            company_id: int, staff_id: int, staff_name: str):
-    """Fire-and-forget: рендерит и шлёт клиенту SMS о заборе вещей водителем, логирует
-    результат в order_activity (используется уже существующей панелью «История» карточки
-    заказа — без отдельной таблицы/эндпоинта под историю SMS)."""
+async def _send_sms_notification(kind: str, order_id: int, phone: str, order_num: str, count: int, lang: str,
+                                  company_id: int, staff_id: int, staff_name: str) -> tuple[bool, str]:
+    """kind: 'pickup' (при заборе) | 'ready' (при готовности). Фиксирует результат в
+    order_activity (вкладка «Уведомления» карточки заказа читает эти же записи).
+    Возвращает (отправлено?, причина_если_нет) — кнопке «📲 SMS» нужна явная ошибка,
+    а не молчаливый no-op."""
     lang = lang if lang in ("ru", "uz") else "ru"
-    if (await _get_cfg("sms_pickup_enabled")) != "true":
-        return
+    if (await _get_cfg(f"sms_{kind}_enabled")) != "true":
+        return False, "Отправка SMS отключена (тогл выключен в Тексты SMS)"
     if not phone:
-        return
-    text = await _render_pickup_sms(lang, order_num, count, company_id)
+        return False, "У заказа нет телефона клиента"
+    text = await _render_sms_notification(kind, lang, order_num, count, company_id)
+    if not text:
+        return False, "Шаблон SMS не настроен"
     ok = await send_sms(phone, text)
-    prefix = "✅ Отправлен" if ok else "❌ Не отправлен"
+    action = "sms_sent" if ok else "sms_failed"
+    prefix = _SMS_KIND_LABEL.get(kind, "📲 SMS") if ok else "❌ SMS не отправлен (Eskiz не настроен или ошибка)"
     try:
-        await db.add_order_activity(order_id, staff_id, staff_name, "sms_sent" if ok else "sms_failed",
-                                     f"{prefix} SMS ({lang.upper()}) на {phone}: {text[:150]}")
+        await db.add_order_activity(order_id, staff_id, staff_name, action,
+                                     f"{prefix} ({lang.upper()}) на {phone}: {text[:150]}")
     except Exception as e:
-        logging.warning(f"_send_pickup_sms activity log failed order={order_id}: {e}")
+        logging.warning(f"_send_sms_notification activity log failed order={order_id}: {e}")
+    return ok, ("" if ok else "Eskiz не настроен или произошла ошибка отправки")
 
 
 def generate_code() -> str:
@@ -2616,8 +2631,8 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
                     created = await db.create_empty_items_by_service(_row["id"], req.items)
                 else:
                     created = await db.create_empty_items(_row["id"], max(0, req.item_count))
-                asyncio.create_task(_send_pickup_sms(_row["id"], req.phone, order_num, len(created),
-                                                      req.sms_lang, staff["company_id"], staff["id"], staff_label))
+                asyncio.create_task(_send_sms_notification("pickup", _row["id"], req.phone, order_num, len(created),
+                                                            req.sms_lang, staff["company_id"], staff["id"], staff_label))
         return {"ok": True, "order_num": order_num}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка: {type(e).__name__}: {e}")
@@ -4426,6 +4441,8 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                     detail=f"У {len(bad)} позиций замер провёл не мойщик — назначьте мойщика "
                            f"или откройте позицию, чтобы её мог взять мойщик")
 
+    _prev_order = await db.get_order_by_id(order_id)
+    _prev_status = _prev_order.get("status") if _prev_order else None
     order = await db.update_order_status(order_id, status,
                                           note=note or f"Статус изменён сотрудником {staff.get('login','')}")
     if status == 'packing' and packer_login:
@@ -4480,8 +4497,23 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                             json={"chat_id": tg_id, "text": text, "parse_mode": "HTML"},
                             timeout=aiohttp.ClientTimeout(total=8),
                         )
+                    try:
+                        await db.add_order_activity(order_id, staff.get("id"), staff.get("login", ""),
+                                                      "tg_sent", f"🔔 TG-уведомление ({lang.upper()}): {text[:150]}")
+                    except Exception as _ae:
+                        logging.warning(f"add_order_activity (tg) failed: {_ae}")
         except Exception as e:
             logging.warning(f"TG notify failed for order {order_id}: {e}")
+
+    # ── SMS клиенту при переходе в «Готов» (если включено в Тексты SMS) ──────
+    if status == "ready" and _prev_status != "ready":
+        try:
+            _ready_count = len(await db.get_order_items(order_id))
+            asyncio.create_task(_send_sms_notification(
+                "ready", order_id, order.get("client_phone", ""), order.get("order_num", ""),
+                _ready_count, "ru", staff["company_id"], staff.get("id"), staff.get("login", "")))
+        except Exception as e:
+            logging.warning(f"ready SMS trigger failed order={order_id}: {e}")
 
     # ── Синхронизировать stop_status в маршруте ──────────────────────────────
     # ── Комиссия агента при доставке ─────────────────────────────────────────
@@ -7198,8 +7230,8 @@ async def staff_pickup_take(order_id: int, req: PickupTakeRequest, staff=Depends
     else:
         created = await db.create_empty_items(order_id, max(0, req.count))
     await db.update_order_status(order_id, "pickup", note=f"Забор ({name}): {len(created)} поз.")
-    asyncio.create_task(_send_pickup_sms(order_id, order.get("client_phone"), order.get("order_num"),
-                                          len(created), req.sms_lang, staff["company_id"], staff["id"], name))
+    asyncio.create_task(_send_sms_notification("pickup", order_id, order.get("client_phone"), order.get("order_num"),
+                                                len(created), req.sms_lang, staff["company_id"], staff["id"], name))
     return {"ok": True, "items": created}
 
 
@@ -7234,19 +7266,23 @@ async def staff_pickup_not_taken(order_id: int, reason: str = Body("", embed=Tru
 
 class ManualSmsRequest(BaseModel):
     lang: str = "ru"
+    kind: str = "pickup"   # "pickup" | "ready"
 
 @app.post("/api/admin/orders/{order_id}/send-sms")
 async def admin_send_pickup_sms(order_id: int, req: ManualSmsRequest,
                                  staff=Depends(require_perm("orders"))):
-    """Ручная/повторная отправка SMS о заборе — кнопка «📲 SMS» в карточке заказа."""
+    """Ручная/повторная отправка SMS — кнопка «📲 SMS» во вкладке «Уведомления» карточки
+    заказа. Уважает тогл «Включить SMS при заборе/Готово» — если выключен, возвращает
+    ok:false с причиной вместо молчаливого no-op."""
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(404, "Заказ не найден")
+    kind = req.kind if req.kind in ("pickup", "ready") else "pickup"
     items = await db.get_order_items(order_id)
     name = _driver_name(staff) if staff.get("role") == "driver" else (staff.get("first_name") or staff.get("login", "Сотрудник"))
-    await _send_pickup_sms(order_id, order.get("client_phone"), order.get("order_num"),
-                            len(items), req.lang, staff["company_id"], staff["id"], name)
-    return {"ok": True}
+    sent, reason = await _send_sms_notification(kind, order_id, order.get("client_phone"), order.get("order_num"),
+                                                 len(items), req.lang, staff["company_id"], staff["id"], name)
+    return {"ok": True, "sent": sent, "reason": reason}
 
 
 async def _driver_take_delivery_core(order_id: int, staff: dict, source: str = "web") -> dict:
@@ -7846,6 +7882,9 @@ SITE_SETTINGS_DEFAULTS = {
     "sms_pickup_enabled":       "false",
     "sms_pickup_template_ru":   "Zakaz {order_num} prinyat kurerom ({count} poz.). Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
     "sms_pickup_template_uz":   "{order_num} buyurtma kuryer tomonidan qabul qilindi ({count} dona). Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
+    "sms_ready_enabled":        "false",
+    "sms_ready_template_ru":    "Zakaz {order_num} gotov. Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
+    "sms_ready_template_uz":    "{order_num} buyurtma tayyor. Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
     # Google Sheets
     "sheets_url":          "",
     # Группа уведомлений
@@ -7980,6 +8019,9 @@ class SiteSettings(BaseModel):
     sms_pickup_enabled:      str | None = None
     sms_pickup_template_ru:  str | None = None
     sms_pickup_template_uz:  str | None = None
+    sms_ready_enabled:       str | None = None
+    sms_ready_template_ru:   str | None = None
+    sms_ready_template_uz:   str | None = None
     sheets_url:          str | None = None
     leads_group_id:          str | None = None
     leads_group_zarafshan:   str | None = None
@@ -12233,7 +12275,8 @@ async def saas_update_support_contact(req: SupportContactRequest, _=Depends(get_
 
 
 _SMS_TEMPLATE_KEYS = ["sms_text_register", "sms_text_login", "sms_text_reset",
-                      "sms_pickup_enabled", "sms_pickup_template_ru", "sms_pickup_template_uz"]
+                      "sms_pickup_enabled", "sms_pickup_template_ru", "sms_pickup_template_uz",
+                      "sms_ready_enabled", "sms_ready_template_ru", "sms_ready_template_uz"]
 
 @app.get("/api/saas/catalog/sms-templates")
 async def saas_get_sms_templates(_=Depends(get_superadmin)):
@@ -12252,6 +12295,9 @@ class SmsTemplatesRequest(BaseModel):
     sms_pickup_enabled:     str | None = None
     sms_pickup_template_ru: str | None = None
     sms_pickup_template_uz: str | None = None
+    sms_ready_enabled:      str | None = None
+    sms_ready_template_ru:  str | None = None
+    sms_ready_template_uz:  str | None = None
 
 @app.put("/api/saas/catalog/sms-templates")
 async def saas_save_sms_templates(body: SmsTemplatesRequest, _=Depends(get_superadmin)):
