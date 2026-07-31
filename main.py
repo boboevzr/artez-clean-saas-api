@@ -930,7 +930,7 @@ async def _render_sms_notification(kind: str, lang: str, order_num: str, count: 
     order_bot_username = await _get_cfg("order_bot_username")
     bot_link = f"t.me/{order_bot_username}" if order_bot_username else ""
     slug = await db.get_company_slug(company_id)
-    site_link = f"cleano.uz/?c={slug}" if slug else "cleano.uz"
+    site_link = f"https://cleano.uz/?c={slug}" if slug else "https://cleano.uz"
     return (tpl.replace("{order_num}", _order_num_short(order_num))
                .replace("{count}", str(count))
                .replace("{phones}", phones)
