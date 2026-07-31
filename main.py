@@ -7884,11 +7884,11 @@ SITE_SETTINGS_DEFAULTS = {
     "sms_text_login":      "Kod podtverzhdeniya dlya vhoda: {code}",
     "sms_text_reset":      "Kod vosstanovleniya parolya: {code}",
     "sms_pickup_enabled":       "false",
-    "sms_pickup_template_ru":   "Zakaz {order_num} prinyat kurerom ({count} poz.). Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
-    "sms_pickup_template_uz":   "{order_num} buyurtma kuryer tomonidan qabul qilindi ({count} dona). Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
+    "sms_pickup_template_ru":   "Zakaz {order_num} prinyat kurerom ({count} poz.). Voprosy: {phones} bot {bot_link} Status na sayte {site_link}",
+    "sms_pickup_template_uz":   "{order_num} buyurtma kuryer tomonidan qabul qilindi ({count} dona). Savollar: {phones} bot {bot_link} Holat: {site_link}",
     "sms_ready_enabled":        "false",
-    "sms_ready_template_ru":    "Zakaz {order_num} gotov. Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
-    "sms_ready_template_uz":    "{order_num} buyurtma tayyor. Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
+    "sms_ready_template_ru":    "Zakaz {order_num} gotov. Voprosy: {phones} bot {bot_link} Status na sayte {site_link}",
+    "sms_ready_template_uz":    "{order_num} buyurtma tayyor. Savollar: {phones} bot {bot_link} Holat: {site_link}",
     # Google Sheets
     "sheets_url":          "",
     # Группа уведомлений
