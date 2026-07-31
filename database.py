@@ -2082,6 +2082,38 @@ async def ensure_saas_schema():
     except Exception as e:
       logging.warning(f"⚠️ API: миграция каталога шаблонов/палитр (step 42) не удалась: {e}")
 
+    # ── Шаг 43: contacts per-company (был global UNIQUE(phone)) ──
+    # Тот же класс бага, что уже чинили для users.phone/site_contacts.branch/crm_clients.phone:
+    # upsert_contact() делал ON CONFLICT (phone) без company_id — компания Б, сохраняя контакт
+    # с уже существующим у компании А номером, молча ПЕРЕЗАПИСЫВАЛА данные контакта компании А
+    # (не создавая свою запись), при этом получая в ответе чужую (уже не свою) строку.
+    async with pool.acquire() as c:
+        try:
+            rows = await c.fetch("""
+                SELECT conname FROM pg_constraint
+                WHERE conrelid='contacts'::regclass AND contype='u'
+                  AND array_length(conkey,1)=1
+                  AND conkey[1]=(SELECT attnum FROM pg_attribute
+                                 WHERE attrelid='contacts'::regclass AND attname='phone')
+            """)
+            for r in rows:
+                try:
+                    await c.execute(f'ALTER TABLE contacts DROP CONSTRAINT IF EXISTS "{r["conname"]}"')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            await c.execute("""
+                DO $$ BEGIN
+                  ALTER TABLE contacts ADD CONSTRAINT contacts_co_phone UNIQUE (company_id, phone);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+        except Exception:
+            pass
+    logging.info("✅ API: contacts per-company constraint (step 43) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -4890,7 +4922,9 @@ async def upsert_contact(phone: str, first_name: str = "", last_name: str = "",
                          middle_name: str = "", phone2: str = "",
                          address: str = "", short_address: str = "",
                          source: str = "ARTEZ") -> dict | None:
-    """Добавить или обновить контакт (ON CONFLICT по phone)."""
+    """Добавить или обновить контакт (ON CONFLICT по company_id+phone — раньше был
+    глобальный UNIQUE(phone), из-за чего компания Б, сохраняя контакт с уже существующим
+    у компании А номером, молча перезаписывала данные контакта компании А)."""
     if not pool or not phone:
         return None
     cid = _cid()
@@ -4898,7 +4932,7 @@ async def upsert_contact(phone: str, first_name: str = "", last_name: str = "",
         row = await conn.fetchrow("""
             INSERT INTO contacts (phone, first_name, last_name, middle_name, phone2, address, short_address, source, company_id)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT (phone) DO UPDATE SET
+            ON CONFLICT (company_id, phone) DO UPDATE SET
                 first_name    = CASE WHEN $2 != '' THEN $2 ELSE contacts.first_name END,
                 last_name     = CASE WHEN $3 != '' THEN $3 ELSE contacts.last_name END,
                 middle_name   = CASE WHEN $4 != '' THEN $4 ELSE contacts.middle_name END,
@@ -4928,7 +4962,7 @@ async def bulk_insert_contacts(rows: list[dict]) -> dict:
                     INSERT INTO contacts
                         (phone, first_name, last_name, middle_name, phone2, address, short_address, source, company_id)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                    ON CONFLICT (phone) DO NOTHING
+                    ON CONFLICT (company_id, phone) DO NOTHING
                     RETURNING id
                 """,
                     phone,
