@@ -931,15 +931,13 @@ async def _render_sms_notification(kind: str, lang: str, order_num: str, count: 
     bot_link = f"t.me/{order_bot_username}" if order_bot_username else ""
     slug = await db.get_company_slug(company_id)
     site_link = f"https://cleano.uz/?c={slug}" if slug else "https://cleano.uz"
-    text = (tpl.replace("{order_num}", _order_num_short(order_num))
+    # Текст шаблона отправляется КАК ЕСТЬ (без авто-схлопывания переносов строк/пробелов) —
+    # пользователь сам контролирует форматирование под то, что одобрено в Eskiz.
+    return (tpl.replace("{order_num}", _order_num_short(order_num))
                .replace("{count}", str(count))
                .replace("{phones}", phones)
                .replace("{bot_link}", bot_link)
                .replace("{site_link}", site_link))
-    # Схлопываем случайные переводы строк/лишние пробелы (напр. Enter при редактировании
-    # шаблона в админке) в один пробел — многострочный текст не совпадает с одобренным
-    # у Eskiz шаблоном и отклоняется модерацией ("текст ещё не прошёл модерацию").
-    return " ".join(text.split())
 
 
 async def _send_sms_notification(kind: str, order_id: int, phone: str, order_num: str, count: int, lang: str,
