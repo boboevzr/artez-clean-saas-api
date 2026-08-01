@@ -11101,6 +11101,86 @@ async def public_cleano_demo_video(lang: str):
                               headers={"Cache-Control": "public, max-age=3600", "Content-Disposition": "inline"})
 
 
+# ── Слайдер фото (лендинг cleano.uz) — показывается вместо видео-карточки после
+# закрытия крестиком. От 1 до 5 фото, тот же паттерн хранения, что у демо-видео
+# (Telegram как бесплатное файловое хранилище, file_id в config). ──
+CLEANO_LANDING_SLIDE_MAX = 5
+
+@app.post("/api/saas/cleano-landing-slides/{index}")
+async def sa_upload_cleano_landing_slide(index: int, file: UploadFile = File(...), _=Depends(get_superadmin)):
+    if not (1 <= index <= CLEANO_LANDING_SLIDE_MAX):
+        raise HTTPException(status_code=400, detail=f"index должен быть от 1 до {CLEANO_LANDING_SLIDE_MAX}")
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть изображением")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    file_bytes = await file.read()
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field("photo", file_bytes, filename=file.filename or f"cleano-slide-{index}.jpg", content_type=file.content_type)
+    form.add_field("caption", f"Cleano landing slide {index}")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form,
+                           timeout=aiohttp.ClientTimeout(total=30)) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+    # sendPhoto возвращает массив уменьшенных копий — берём последнюю (самое большое разрешение)
+    file_id = result["result"]["photo"][-1]["file_id"]
+    await db.set_config(f"cleano_landing_slide_{index}", file_id)
+    return {"ok": True}
+
+
+@app.delete("/api/saas/cleano-landing-slides/{index}")
+async def sa_delete_cleano_landing_slide(index: int, _=Depends(get_superadmin)):
+    if not (1 <= index <= CLEANO_LANDING_SLIDE_MAX):
+        raise HTTPException(status_code=400, detail=f"index должен быть от 1 до {CLEANO_LANDING_SLIDE_MAX}")
+    await db.set_config(f"cleano_landing_slide_{index}", "")
+    return {"ok": True}
+
+
+@app.get("/api/saas/cleano-landing-slides-status")
+async def sa_cleano_landing_slides_status(_=Depends(get_superadmin)):
+    result = {}
+    for i in range(1, CLEANO_LANDING_SLIDE_MAX + 1):
+        result[str(i)] = bool(await db.get_config(f"cleano_landing_slide_{i}"))
+    return {"ok": True, "slides": result}
+
+
+@app.get("/api/cleano/landing-slides-list")
+async def public_cleano_landing_slides_list():
+    """Публичный список индексов слайдов, у которых реально загружено фото — без авторизации."""
+    indices = []
+    for i in range(1, CLEANO_LANDING_SLIDE_MAX + 1):
+        if await db.get_config(f"cleano_landing_slide_{i}"):
+            indices.append(i)
+    return {"ok": True, "indices": indices}
+
+
+@app.get("/api/cleano/landing-slide/{index}")
+async def public_cleano_landing_slide(index: int):
+    """Публичная раздача фото слайдера лендинга cleano.uz — без авторизации."""
+    from fastapi.responses import StreamingResponse
+    if not (1 <= index <= CLEANO_LANDING_SLIDE_MAX):
+        raise HTTPException(status_code=404)
+    file_id = await db.get_config(f"cleano_landing_slide_{index}")
+    if not file_id or not BOT_TOKEN:
+        raise HTTPException(status_code=404, detail="Фото не загружено")
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                          params={"file_id": file_id}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            data = await r.json()
+        if not data.get("ok"):
+            raise HTTPException(status_code=502, detail="Файл не найден в Telegram")
+        file_path = data["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as fr:
+            content = await fr.read()
+    return StreamingResponse(iter([content]), media_type="image/jpeg",
+                              headers={"Cache-Control": "public, max-age=3600", "Content-Disposition": "inline"})
+
+
 # ── SAAS PLANS ──────────────────────────────────────────────────────────────
 
 @app.get("/api/saas/plans")
