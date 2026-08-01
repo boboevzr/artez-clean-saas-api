@@ -7944,6 +7944,9 @@ SITE_SETTINGS_DEFAULTS = {
     "agent_cta_text_uz":       "🤝 Agent bo'lish",
     "agent_learnmore_text_ru": "Подробнее о программе",
     "agent_learnmore_text_uz": "Dastur haqida batafsil",
+    # Видео-карточка на главной странице сайта (своё видео компании)
+    "site_video_enabled":      "false",
+    "site_video_placement":    "hero",  # hero | how_it_works | reviews | floating
 }
 
 async def _get_cfg(key: str) -> str:
@@ -7972,6 +7975,7 @@ async def get_site_settings(company_slug: str = None):
         "agent_card3_value", "agent_card3_label_ru", "agent_card3_label_uz",
         "agent_cta_text_ru", "agent_cta_text_uz",
         "agent_learnmore_text_ru", "agent_learnmore_text_uz",
+        "site_video_enabled", "site_video_placement",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -8053,6 +8057,8 @@ class SiteSettings(BaseModel):
     agent_cta_text_uz:       str | None = None
     agent_learnmore_text_ru: str | None = None
     agent_learnmore_text_uz: str | None = None
+    site_video_enabled:      str | None = None
+    site_video_placement:    str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
@@ -11963,6 +11969,71 @@ async def get_site_slides_public(company_slug: str = None):
     """Публичный список слайдов для автослайдера на сайте."""
     cid = await _resolve_client_company_id(company_slug)
     return {"ok": True, "slides": await db.get_site_slides(cid)}
+
+
+# ── Видео-карточка на главной странице сайта компании ────────────────────
+# Своё видео каждой компании (не путать с демо-видео Cleano выше — то показывает
+# ЛЕНДИНГ Cleano, это показывает САЙТ КОМПАНИИ-клиента). Тот же приём хранения:
+# Telegram как бесплатное файловое хранилище, file_id в company-scoped config.
+MAX_SITE_VIDEO_BYTES = 19_000_000  # запас под лимит Telegram getFile (20 МБ)
+
+@app.post("/api/admin/site-video")
+async def admin_upload_site_video(file: UploadFile = File(...), _=Depends(get_admin)):
+    if not (file.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть видео")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_SITE_VIDEO_BYTES:
+        raise HTTPException(status_code=400, detail=f"Видео слишком большое (макс. {MAX_SITE_VIDEO_BYTES//1_000_000} МБ)")
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field("video", file_bytes, filename=file.filename or "site-video.mp4", content_type=file.content_type)
+    form.add_field("caption", "Site video card")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=form,
+                           timeout=aiohttp.ClientTimeout(total=60)) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+    file_id = result["result"]["video"]["file_id"]
+    await db.set_config("site_video_file_id", file_id)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/site-video")
+async def admin_delete_site_video(_=Depends(get_admin)):
+    await db.set_config("site_video_file_id", "")
+    return {"ok": True}
+
+
+@app.get("/api/admin/site-video-status")
+async def admin_site_video_status(_=Depends(get_admin)):
+    return {"ok": True, "has_video": bool(await db.get_config("site_video_file_id"))}
+
+
+@app.get("/api/site-video")
+async def public_site_video(company_slug: str = None):
+    """Публичная раздача видео-карточки сайта компании — без авторизации."""
+    from fastapi.responses import StreamingResponse
+    cid = await _resolve_client_company_id(company_slug)
+    db.set_request_company(cid)
+    file_id = await db.get_config("site_video_file_id")
+    if not file_id or not BOT_TOKEN:
+        raise HTTPException(status_code=404, detail="Видео не загружено")
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                          params={"file_id": file_id}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            data = await r.json()
+        if not data.get("ok"):
+            raise HTTPException(status_code=502, detail="Файл не найден в Telegram")
+        file_path = data["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=60)) as fr:
+            content = await fr.read()
+    return StreamingResponse(iter([content]), media_type="video/mp4",
+                              headers={"Cache-Control": "public, max-age=3600", "Content-Disposition": "inline"})
 
 
 # ── Статистика на главной странице (ровно 4 карточки — фиксированная сетка) ──
