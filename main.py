@@ -11973,12 +11973,15 @@ async def get_site_slides_public(company_slug: str = None):
 
 # ── Видео-карточка на главной странице сайта компании ────────────────────
 # Своё видео каждой компании (не путать с демо-видео Cleano выше — то показывает
-# ЛЕНДИНГ Cleano, это показывает САЙТ КОМПАНИИ-клиента). Тот же приём хранения:
-# Telegram как бесплатное файловое хранилище, file_id в company-scoped config.
+# ЛЕНДИНГ Cleano, это показывает САЙТ КОМПАНИИ-клиента). Отдельное видео на RU/UZ,
+# тот же приём хранения: Telegram как бесплатное файловое хранилище, file_id
+# в company-scoped config (по ключу на язык, как cleano_demo_video_{lang}).
 MAX_SITE_VIDEO_BYTES = 19_000_000  # запас под лимит Telegram getFile (20 МБ)
 
-@app.post("/api/admin/site-video")
-async def admin_upload_site_video(file: UploadFile = File(...), _=Depends(get_admin)):
+@app.post("/api/admin/site-video/{lang}")
+async def admin_upload_site_video(lang: str, file: UploadFile = File(...), _=Depends(get_admin)):
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=400, detail="lang должен быть ru или uz")
     if not (file.content_type or "").startswith("video/"):
         raise HTTPException(status_code=400, detail="Файл должен быть видео")
     media_ch = await _get_media_channel()
@@ -11989,8 +11992,8 @@ async def admin_upload_site_video(file: UploadFile = File(...), _=Depends(get_ad
         raise HTTPException(status_code=400, detail=f"Видео слишком большое (макс. {MAX_SITE_VIDEO_BYTES//1_000_000} МБ)")
     form = aiohttp.FormData()
     form.add_field("chat_id", str(media_ch))
-    form.add_field("video", file_bytes, filename=file.filename or "site-video.mp4", content_type=file.content_type)
-    form.add_field("caption", "Site video card")
+    form.add_field("video", file_bytes, filename=file.filename or f"site-video-{lang}.mp4", content_type=file.content_type)
+    form.add_field("caption", f"Site video card ({lang})")
     async with aiohttp.ClientSession() as s:
         async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=form,
                            timeout=aiohttp.ClientTimeout(total=60)) as r:
@@ -11998,28 +12001,34 @@ async def admin_upload_site_video(file: UploadFile = File(...), _=Depends(get_ad
     if not result.get("ok"):
         raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
     file_id = result["result"]["video"]["file_id"]
-    await db.set_config("site_video_file_id", file_id)
+    await db.set_config(f"site_video_file_id_{lang}", file_id)
     return {"ok": True}
 
 
-@app.delete("/api/admin/site-video")
-async def admin_delete_site_video(_=Depends(get_admin)):
-    await db.set_config("site_video_file_id", "")
+@app.delete("/api/admin/site-video/{lang}")
+async def admin_delete_site_video(lang: str, _=Depends(get_admin)):
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=400, detail="lang должен быть ru или uz")
+    await db.set_config(f"site_video_file_id_{lang}", "")
     return {"ok": True}
 
 
 @app.get("/api/admin/site-video-status")
 async def admin_site_video_status(_=Depends(get_admin)):
-    return {"ok": True, "has_video": bool(await db.get_config("site_video_file_id"))}
+    ru = await db.get_config("site_video_file_id_ru")
+    uz = await db.get_config("site_video_file_id_uz")
+    return {"ok": True, "ru": bool(ru), "uz": bool(uz)}
 
 
-@app.get("/api/site-video")
-async def public_site_video(company_slug: str = None):
+@app.get("/api/site-video/{lang}")
+async def public_site_video(lang: str, company_slug: str = None):
     """Публичная раздача видео-карточки сайта компании — без авторизации."""
     from fastapi.responses import StreamingResponse
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=404)
     cid = await _resolve_client_company_id(company_slug)
     db.set_request_company(cid)
-    file_id = await db.get_config("site_video_file_id")
+    file_id = await db.get_config(f"site_video_file_id_{lang}")
     if not file_id or not BOT_TOKEN:
         raise HTTPException(status_code=404, detail="Видео не загружено")
     async with aiohttp.ClientSession() as s:
