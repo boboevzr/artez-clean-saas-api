@@ -2114,6 +2114,32 @@ async def ensure_saas_schema():
             pass
     logging.info("✅ API: contacts per-company constraint (step 43) ready")
 
+    # ── Шаг 44: единая база "актуальных" контактов (реальные клиенты crm_clients +
+    # дозвонившиеся из автодозвона) — источник для будущей массовой SMS-рассылки
+    # и автодозвона. НЕ путать с crm_clients (карточка клиента) или contacts
+    # (справочник для ручного импорта Excel-списков под автодозвон). company_id —
+    # с самого начала (в отличие от прод-версии, где его добавляли миграцией задним
+    # числом), т.к. таблица per-company с рождения.
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS active_contacts (
+            id            SERIAL PRIMARY KEY,
+            company_id    INTEGER NOT NULL,
+            phone         VARCHAR(20) NOT NULL,
+            first_name    VARCHAR(100) DEFAULT '',
+            last_name     VARCHAR(100) DEFAULT '',
+            source        VARCHAR(20) DEFAULT 'crm' CHECK (source IN ('crm','autodial','both')),
+            crm_client_id INTEGER REFERENCES crm_clients(id) ON DELETE SET NULL,
+            note          TEXT DEFAULT '',
+            created_at    TIMESTAMPTZ DEFAULT NOW(),
+            updated_at    TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (company_id, phone)
+        );
+        CREATE INDEX IF NOT EXISTS idx_active_contacts_company ON active_contacts(company_id);
+        CREATE INDEX IF NOT EXISTS idx_active_contacts_phone   ON active_contacts(phone);
+        """)
+    logging.info("✅ API: active_contacts (step 44) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -4730,7 +4756,16 @@ async def upsert_crm_client(phone: str, first_name: str = "", last_name: str = "
             RETURNING *
         """, phone, first_name or "", last_name or "", tg_id, tg_username, source,
              address or "", short_address or "", cid)
-        return dict(row) if row else {}
+        result = dict(row) if row else {}
+        if result:
+            # Реальный клиент — автоматически зеркалим в active_contacts (см. Шаг 44).
+            try:
+                await upsert_active_contact(phone, first_name=result.get("first_name") or "",
+                                             last_name=result.get("last_name") or "",
+                                             source="crm", crm_client_id=result.get("id"), cid=cid)
+            except Exception:
+                logging.warning("upsert_active_contact failed for %s (company %s)", phone, cid, exc_info=True)
+        return result
 
 
 async def refresh_crm_client_stats(phone: str):
@@ -4881,6 +4916,162 @@ async def get_crm_clients_count() -> dict:
             "SELECT status, COUNT(*) as cnt FROM crm_clients WHERE company_id=$1 GROUP BY status", cid
         )
         return {r["status"]: r["cnt"] for r in rows}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACTIVE CONTACTS (единая база "актуальных" номеров — crm_clients + дозвонившиеся
+# автодозвона; источник для будущей массовой SMS-рассылки/автодозвона)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _autodial_phone_to_e164(phone: str) -> str:
+    """Дозвонщик (autodial_agent.py) хранит номер в AMI-формате (9 цифр, без 998).
+    Приводим к каноническому +998XXXXXXXXX, как везде в остальной базе."""
+    if not phone:
+        return ""
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if len(digits) == 9:
+        return f"+998{digits}"
+    if len(digits) == 12 and digits.startswith("998"):
+        return f"+{digits}"
+    if phone.startswith("+"):
+        return phone
+    return ""
+
+
+def _normalize_phone_local(phone: str) -> str:
+    """Локальная копия normalize_phone() из main.py — без кросс-модульного импорта."""
+    if not phone:
+        return ""
+    p = phone.strip().replace(" ", "").replace("-", "")
+    if not p.startswith("+"):
+        p = "+" + p
+    return p
+
+
+async def upsert_active_contact(phone: str, first_name: str = "", last_name: str = "",
+                                 source: str = "crm", crm_client_id: int = None,
+                                 note: str = "", cid: int = None) -> dict:
+    """Добавляет/обновляет номер в active_contacts своей компании. Дубликаты по
+    (company_id, phone) схлопываются; source мержится в 'both', если пришёл из
+    другого канала. cid можно передать явно — для вызовов вне request-контекста
+    (напр. /api/verify, где company_id резолвится по slug, а не из JWT)."""
+    if not pool or not phone:
+        return {}
+    company_id = cid if cid is not None else _cid()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO active_contacts (company_id, phone, first_name, last_name, source, crm_client_id, note)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (company_id, phone) DO UPDATE SET
+                first_name    = CASE WHEN $3 != '' THEN $3 ELSE active_contacts.first_name END,
+                last_name     = CASE WHEN $4 != '' THEN $4 ELSE active_contacts.last_name END,
+                source        = CASE WHEN active_contacts.source = $5 THEN active_contacts.source ELSE 'both' END,
+                crm_client_id = COALESCE($6, active_contacts.crm_client_id),
+                updated_at    = NOW()
+            RETURNING *
+        """, company_id, phone, first_name or "", last_name or "", source, crm_client_id, note or "")
+        return dict(row) if row else {}
+
+
+async def import_answered_autodial_calls(campaign_id: int) -> int:
+    """Импортирует дозвонившихся из кампании автодозвона в active_contacts своей
+    компании. ВАЖНО: agent (autodial_agent.py) пишет результат звонка в
+    status='answered', поле answered_at в autodial_calls никогда не заполняется —
+    фильтровать надо по status, не по answered_at (баг найден и исправлен в проде
+    04.08 по логам — здесь сразу делаем правильно). Возвращает кол-во импортированных."""
+    if not pool:
+        return 0
+    cid = _cid()
+    async with pool.acquire() as conn:
+        owner = await conn.fetchval("SELECT company_id FROM autodial_campaigns WHERE id=$1", campaign_id)
+        if owner != cid:
+            return 0
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (phone) phone, name FROM autodial_calls "
+            "WHERE campaign_id=$1 AND status='answered'",
+            campaign_id
+        )
+        count = 0
+        for r in rows:
+            phone = _autodial_phone_to_e164(r["phone"])
+            if not phone:
+                continue
+            await upsert_active_contact(phone, first_name=r["name"] or "", source="autodial", cid=cid)
+            count += 1
+        return count
+
+
+async def backfill_active_contacts() -> dict:
+    """Разовый импорт исторических контактов (crm_clients + лиды + подтверждённые
+    пользователи сайта) своей компании в active_contacts. НЕ трогает contacts
+    (справочник) — по замыслу это отдельная, третья база (см. переписку с ARTEZ)."""
+    if not pool:
+        return {"crm_clients": 0, "leads": 0, "site_users": 0}
+    cid = _cid()
+    stats = {"crm_clients": 0, "leads": 0, "site_users": 0}
+    async with pool.acquire() as conn:
+        clients = await conn.fetch("SELECT * FROM crm_clients WHERE company_id=$1", cid)
+        for c in clients:
+            await upsert_active_contact(c["phone"], first_name=c["first_name"] or "",
+                                         last_name=c["last_name"] or "", source="crm",
+                                         crm_client_id=c["id"], cid=cid)
+            stats["crm_clients"] += 1
+
+        leads = await conn.fetch(
+            "SELECT DISTINCT ON (client_phone) client_phone, client_name FROM leads "
+            "WHERE company_id=$1 AND client_phone IS NOT NULL AND client_phone != ''", cid)
+        for l in leads:
+            phone = _normalize_phone_local(l["client_phone"])
+            if not phone:
+                continue
+            await upsert_crm_client(phone, first_name=l["client_name"] or "", source="lead_backfill")
+            stats["leads"] += 1
+
+        users = await conn.fetch(
+            "SELECT phone, first_name FROM users WHERE company_id=$1 AND is_verified=true", cid)
+        for u in users:
+            phone = _normalize_phone_local(u["phone"])
+            if not phone:
+                continue
+            await upsert_crm_client(phone, first_name=u["first_name"] or "", source="site_backfill")
+            stats["site_users"] += 1
+    return stats
+
+
+async def get_active_contacts_list(search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+    if not pool:
+        return []
+    cid = _cid()
+    async with pool.acquire() as conn:
+        if search:
+            rows = await conn.fetch("""
+                SELECT ac.*, cc.address AS address FROM active_contacts ac
+                LEFT JOIN crm_clients cc ON cc.id = ac.crm_client_id
+                WHERE ac.company_id=$1 AND (ac.phone ILIKE $2 OR ac.first_name ILIKE $2 OR ac.last_name ILIKE $2)
+                ORDER BY ac.updated_at DESC
+                LIMIT $3 OFFSET $4
+            """, cid, f"%{search}%", limit, offset)
+        else:
+            rows = await conn.fetch("""
+                SELECT ac.*, cc.address AS address FROM active_contacts ac
+                LEFT JOIN crm_clients cc ON cc.id = ac.crm_client_id
+                WHERE ac.company_id=$1
+                ORDER BY ac.updated_at DESC
+                LIMIT $2 OFFSET $3
+            """, cid, limit, offset)
+        return [dict(r) for r in rows]
+
+
+async def get_active_contacts_count(search: str = "") -> int:
+    if not pool:
+        return 0
+    cid = _cid()
+    async with pool.acquire() as conn:
+        if search:
+            return await conn.fetchval(
+                "SELECT COUNT(*) FROM active_contacts WHERE company_id=$1 AND (phone ILIKE $2 OR first_name ILIKE $2 OR last_name ILIKE $2)",
+                cid, f"%{search}%")
+        return await conn.fetchval("SELECT COUNT(*) FROM active_contacts WHERE company_id=$1", cid)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
