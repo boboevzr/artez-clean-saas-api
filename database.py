@@ -439,6 +439,7 @@ async def create_tables():
         "ALTER TABLE settings ADD COLUMN IF NOT EXISTS media_channel_id VARCHAR(50) DEFAULT NULL",
         # Уведомления о новых пользователях сайта
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_new_users BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS hide_client_phone BOOLEAN DEFAULT FALSE",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS blocked BOOLEAN DEFAULT FALSE",
         # Автодозвон: кампании
         """CREATE TABLE IF NOT EXISTS autodial_campaigns (
