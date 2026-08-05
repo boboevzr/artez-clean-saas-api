@@ -2141,6 +2141,31 @@ async def ensure_saas_schema():
         """)
     logging.info("✅ API: active_contacts (step 44) ready")
 
+    # ── Шаг 45: чёрный список (не участвуют в автодозвоне/SMS) — company_id с
+    # рождения. Причина хранится только здесь; в contacts/active_contacts/users/
+    # clients (таблица бота) — лёгкий флаг blacklisted, синхронизируемый отсюда.
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS blacklist (
+            id         SERIAL PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            phone      VARCHAR(20) NOT NULL,
+            name       VARCHAR(150) DEFAULT '',
+            note       TEXT DEFAULT '',
+            added_by   VARCHAR(100) DEFAULT '',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (company_id, phone)
+        );
+        CREATE INDEX IF NOT EXISTS idx_blacklist_company ON blacklist(company_id);
+        """)
+        for _tbl in ("contacts", "active_contacts", "users", "clients", "crm_clients"):
+            try:
+                await c.execute(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS blacklisted BOOLEAN DEFAULT FALSE")
+            except Exception:
+                pass  # clients (таблица бота) может не существовать на этой БД
+    logging.info("✅ API: blacklist (step 45) ready")
+
 
 # ══════════════════════════════════════
 #  ПОЛЬЗОВАТЕЛИ
@@ -2306,7 +2331,7 @@ async def get_all_site_users(search: str = "", limit: int = 500):
     cid = _cid()
     base = """
         SELECT u.id, u.phone, u.first_name, u.is_verified, u.tg_id,
-               u.address,
+               u.address, u.blacklisted,
                u.created_at, u.updated_at, u.last_login,
                EXISTS(SELECT 1 FROM staff s WHERE s.site_user_id = u.id AND s.active = TRUE) AS is_agent
         FROM users u
@@ -5076,6 +5101,99 @@ async def get_active_contacts_count(search: str = "") -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ЧЁРНЫЙ СПИСОК (не участвуют в автодозвоне/SMS) — company-scoped, причина
+# хранится только здесь; в contacts/active_contacts/users/clients — флаг.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BLACKLIST_SOURCE_TABLES = ("contacts", "active_contacts", "users", "clients", "crm_clients")
+
+async def _mark_blacklisted_everywhere(conn, cid: int, phone: str, value: bool):
+    for table in _BLACKLIST_SOURCE_TABLES:
+        try:
+            await conn.execute(f"UPDATE {table} SET blacklisted=$1 WHERE phone=$2 AND company_id=$3", value, phone, cid)
+        except Exception:
+            pass  # clients (таблица бота) может не существовать на этой БД
+
+async def upsert_blacklist_entry(phone: str, note: str = "", added_by: str = "", name: str = "") -> dict:
+    if not pool or not phone:
+        return {}
+    cid = _cid()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO blacklist (company_id, phone, note, added_by, name)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (company_id, phone) DO UPDATE SET
+                note = CASE WHEN $3 != '' THEN $3 ELSE blacklist.note END,
+                name = CASE WHEN $5 != '' THEN $5 ELSE blacklist.name END,
+                updated_at = NOW()
+            RETURNING *
+        """, cid, phone, note or "", added_by or "", name or "")
+        await _mark_blacklisted_everywhere(conn, cid, phone, True)
+        return dict(row) if row else {}
+
+async def remove_from_blacklist(phone: str) -> bool:
+    if not pool or not phone:
+        return False
+    cid = _cid()
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM blacklist WHERE phone=$1 AND company_id=$2", phone, cid)
+        await _mark_blacklisted_everywhere(conn, cid, phone, False)
+        return res == "DELETE 1"
+
+async def get_blacklist_list(search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+    if not pool:
+        return []
+    cid = _cid()
+    async with pool.acquire() as conn:
+        if search:
+            rows = await conn.fetch(
+                "SELECT * FROM blacklist WHERE company_id=$1 AND (phone ILIKE $2 OR note ILIKE $2) "
+                "ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+                cid, f"%{search}%", limit, offset)
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM blacklist WHERE company_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+                cid, limit, offset)
+        return [dict(r) for r in rows]
+
+async def get_blacklist_count(search: str = "") -> int:
+    if not pool:
+        return 0
+    cid = _cid()
+    async with pool.acquire() as conn:
+        if search:
+            return await conn.fetchval(
+                "SELECT COUNT(*) FROM blacklist WHERE company_id=$1 AND (phone ILIKE $2 OR note ILIKE $2)",
+                cid, f"%{search}%")
+        return await conn.fetchval("SELECT COUNT(*) FROM blacklist WHERE company_id=$1", cid)
+
+async def sync_blacklist_flags() -> dict:
+    """Кнопка «Обновить» — досвежа проставляет флаг blacklisted по текущему
+    списку blacklist своей компании и снимает флаг там, где номера в ЧС больше нет."""
+    if not pool:
+        return {}
+    cid = _cid()
+    stats = {}
+    async with pool.acquire() as conn:
+        for table in _BLACKLIST_SOURCE_TABLES:
+            try:
+                r1 = await conn.execute(f"""
+                    UPDATE {table} SET blacklisted=TRUE
+                    WHERE company_id=$1 AND phone IN (SELECT phone FROM blacklist WHERE company_id=$1)
+                          AND blacklisted IS DISTINCT FROM TRUE
+                """, cid)
+                r2 = await conn.execute(f"""
+                    UPDATE {table} SET blacklisted=FALSE
+                    WHERE company_id=$1 AND phone NOT IN (SELECT phone FROM blacklist WHERE company_id=$1)
+                          AND blacklisted=TRUE
+                """, cid)
+                stats[table] = {"marked": int(r1.split()[-1]), "cleared": int(r2.split()[-1])}
+            except Exception:
+                stats[table] = {"marked": 0, "cleared": 0}
+    return stats
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CONTACTS (справочник)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -5138,16 +5256,21 @@ async def upsert_contact(phone: str, first_name: str = "", last_name: str = "",
 
 
 async def bulk_insert_contacts(rows: list[dict]) -> dict:
-    """Массовая вставка контактов своей компании. Возвращает {ok, dup, err}."""
+    """Массовая вставка контактов своей компании. Возвращает {ok, dup, err, blacklisted}."""
     if not pool:
-        return {"ok": 0, "dup": 0, "err": len(rows)}
+        return {"ok": 0, "dup": 0, "err": len(rows), "blacklisted": 0}
     cid = _cid()
-    ok = dup = err = 0
+    ok = dup = err = blacklisted = 0
     async with pool.acquire() as conn:
+        bl_phones = {r["phone"] for r in await conn.fetch(
+            "SELECT phone FROM blacklist WHERE company_id=$1", cid)}
         for r in rows:
             phone = str(r.get("phone", "")).strip()
             if not phone:
                 err += 1
+                continue
+            if phone in bl_phones:
+                blacklisted += 1
                 continue
             try:
                 res = await conn.fetchval("""
@@ -5173,7 +5296,7 @@ async def bulk_insert_contacts(rows: list[dict]) -> dict:
                     dup += 1
             except Exception:
                 err += 1
-    return {"ok": ok, "dup": dup, "err": err}
+    return {"ok": ok, "dup": dup, "err": err, "blacklisted": blacklisted}
 
 
 async def get_contacts_list(search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
@@ -5643,13 +5766,16 @@ async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
         blocked_col = "blocked" if await conn.fetchval(
             "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='clients' AND column_name='blocked'"
         ) else "FALSE::boolean AS blocked"
+        bl_col = "blacklisted" if await conn.fetchval(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='clients' AND column_name='blacklisted'"
+        ) else "FALSE::boolean AS blacklisted"
         if search:
             rows = await conn.fetch(f"""
                 SELECT id, tg_id, tg_username, first_name, last_name, phone,
                        lang, total_orders AS orders_count,
                        NULL::numeric AS total_spent,
                        NULL::timestamptz AS last_order_at,
-                       created_at, {blocked_col}
+                       created_at, {blocked_col}, {bl_col}
                 FROM clients
                 WHERE company_id=$1
                   AND (phone ILIKE $2 OR first_name ILIKE $2
@@ -5663,7 +5789,7 @@ async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
                        lang, total_orders AS orders_count,
                        NULL::numeric AS total_spent,
                        NULL::timestamptz AS last_order_at,
-                       created_at, {blocked_col}
+                       created_at, {blocked_col}, {bl_col}
                 FROM clients
                 WHERE company_id=$1
                 ORDER BY created_at DESC

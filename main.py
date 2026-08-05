@@ -2636,18 +2636,21 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             source="staff",
         )
         await db.refresh_crm_client_stats(req.phone)
-        if req.items or req.item_count:
-            async with db.pool.acquire() as conn:
-                _row = await conn.fetchrow("SELECT id FROM orders WHERE order_num=$1 AND company_id=$2",
-                                            order_num, staff["company_id"])
-            if _row:
+        # SMS больше не шлём молча — фронт после успешного создания сам спросит
+        # (модалка "Отправить SMS клиенту?" с выбором языка), если item_count > 0,
+        # и вызовет /send-sms явно (портировано из прода, запрос 2026-08-05).
+        order_id = None
+        async with db.pool.acquire() as conn:
+            _row = await conn.fetchrow("SELECT id FROM orders WHERE order_num=$1 AND company_id=$2",
+                                        order_num, staff["company_id"])
+        if _row:
+            order_id = _row["id"]
+            if req.items or req.item_count:
                 if req.items:
-                    created = await db.create_empty_items_by_service(_row["id"], req.items)
+                    await db.create_empty_items_by_service(order_id, req.items)
                 else:
-                    created = await db.create_empty_items(_row["id"], max(0, req.item_count))
-                asyncio.create_task(_send_sms_notification("pickup", _row["id"], req.phone, order_num, len(created),
-                                                            req.sms_lang, staff["company_id"], staff["id"], staff_label))
-        return {"ok": True, "order_num": order_num}
+                    await db.create_empty_items(order_id, max(0, req.item_count))
+        return {"ok": True, "order_num": order_num, "id": order_id, "item_count": req.item_count or len(req.items or [])}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка: {type(e).__name__}: {e}")
 
@@ -2794,6 +2797,41 @@ async def active_contacts_backfill(_=Depends(_get_admin)):
     """Разовый импорт исторических контактов (crm_clients + лиды + подтверждённые
     пользователи сайта) своей компании в единую базу актуальных контактов."""
     stats = await db.backfill_active_contacts()
+    return {"ok": True, "stats": stats}
+
+
+@app.get("/api/admin/blacklist")
+async def blacklist_list(search: str = "", limit: int = 50, offset: int = 0,
+                          _=Depends(_get_admin_or_staff_clients)):
+    rows = await db.get_blacklist_list(search=search, limit=limit, offset=offset)
+    count = await db.get_blacklist_count(search=search)
+    return {"ok": True, "entries": rows, "count": count}
+
+
+@app.post("/api/admin/blacklist/toggle")
+async def blacklist_toggle(body: dict = Body(...), staff=Depends(get_current_staff)):
+    role = staff.get("role", "")
+    perms = ROLE_PERMISSIONS.get(role, [])
+    if "clients" not in perms and role != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    phone = normalize_phone(body.get("phone", ""))
+    if not phone:
+        raise HTTPException(status_code=400, detail="Не указан телефон")
+    if body.get("blacklisted", True):
+        added_by = staff.get("login") or staff.get("first_name") or ""
+        entry = await db.upsert_blacklist_entry(phone, note=body.get("note", ""), added_by=added_by,
+                                                 name=body.get("name", ""))
+        return {"ok": True, "entry": entry}
+    else:
+        await db.remove_from_blacklist(phone)
+        return {"ok": True}
+
+
+@app.post("/api/admin/blacklist/sync")
+async def blacklist_sync(_=Depends(_get_admin)):
+    """Кнопка «Обновить» — досвежа проставляет флаг blacklisted во всех
+    таблицах своей компании (справочник/актуальные/пользователи сайта/TG-клиенты)."""
+    stats = await db.sync_blacklist_flags()
     return {"ok": True, "stats": stats}
 
 
@@ -2987,7 +3025,7 @@ async def contacts_export(
 ):
     """Экспорт контактов своей компании без лимита с фильтрами."""
     async with db.pool.acquire() as conn:
-        conditions = ["1=1"]
+        conditions = ["NOT COALESCE(blacklisted, FALSE)"]
         params: list = []
         i = 1
         if search:
@@ -9196,6 +9234,11 @@ async def autodial_start(cid: int, ccid: int = Depends(_get_admin_cid)):
         phones_seen = set()
         rows_to_insert = []
 
+        # Чёрный список своей компании — номера отсюда не должны попадать в автодозвон.
+        async with db.pool.acquire() as conn:
+            blacklisted_phones = {r["phone"] for r in await conn.fetch(
+                "SELECT phone FROM blacklist WHERE company_id=$1", ccid)}
+
         group_ids = []
         try:
             gids = campaign["group_ids"]
@@ -9211,6 +9254,8 @@ async def autodial_start(cid: int, ccid: int = Depends(_get_admin_cid)):
                     group_ids
                 )
             for m in members:
+                if normalize_phone(m["phone"] or "") in blacklisted_phones:
+                    continue
                 p = _ami_phone((m["phone"] or "").strip())
                 if p and p not in phones_seen:
                     phones_seen.add(p)
@@ -9224,6 +9269,8 @@ async def autodial_start(cid: int, ccid: int = Depends(_get_admin_cid)):
                     ccid
                 )
             for r in crows:
+                if normalize_phone(r["phone"] or "") in blacklisted_phones:
+                    continue
                 p = _ami_phone((r["phone"] or "").strip())
                 if p and p not in phones_seen:
                     phones_seen.add(p)
@@ -9321,6 +9368,35 @@ async def autodial_create_group_from_calls(cid: int, body: dict = Body(...), cci
                 "INSERT INTO autodial_group_members (group_id,phone,name,source_type,company_id) "
                 "VALUES ($1,$2,$3,'campaign',$4) ON CONFLICT (group_id,phone) DO NOTHING",
                 gid, phone, c["name"] or "", ccid)
+            inserted += 1
+    return {"ok": True, "group_id": gid, "group_name": group_name, "inserted": inserted}
+
+
+@app.post("/api/admin/autodial/groups/from-active-contacts")
+async def autodial_create_group_from_active_contacts(body: dict = Body(...), ccid: int = Depends(_get_admin_cid)):
+    """Создать группу автодозвона из базы «✅ Актуальные контакты» своей компании (без ЧС)."""
+    group_name = (body.get("name") or "").strip()
+    if not group_name:
+        raise HTTPException(400, "name required")
+    async with db.pool.acquire() as conn:
+        contacts = await conn.fetch(
+            "SELECT phone, first_name, last_name FROM active_contacts "
+            "WHERE company_id=$1 AND NOT COALESCE(blacklisted, FALSE)", ccid)
+        if not contacts:
+            raise HTTPException(400, "Нет актуальных контактов")
+        group = await conn.fetchrow(
+            "INSERT INTO autodial_groups (name,company_id) VALUES ($1,$2) RETURNING *", group_name, ccid)
+        gid = group["id"]
+        inserted = 0
+        for c in contacts:
+            phone = _ami_phone(str(c["phone"]).strip())
+            if not phone:
+                continue
+            name = f"{c['first_name'] or ''} {c['last_name'] or ''}".strip()
+            await conn.execute(
+                "INSERT INTO autodial_group_members (group_id,phone,name,source_type,company_id) "
+                "VALUES ($1,$2,$3,'active_contacts',$4) ON CONFLICT (group_id,phone) DO NOTHING",
+                gid, phone, name, ccid)
             inserted += 1
     return {"ok": True, "group_id": gid, "group_name": group_name, "inserted": inserted}
 
